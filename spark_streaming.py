@@ -1,26 +1,4 @@
 import os
-import sys
-from pathlib import Path
-
-# --- 1. BẢN VÁ LỖI CHO WINDOWS (BẮT BUỘC PHẢI NẰM TRÊN CÙNG) ---
-def resolve_hadoop_home():
-    env_home = os.environ.get('HADOOP_HOME')
-    candidates = []
-
-    if env_home:
-        candidates.append(Path(env_home))
-
-    project_dir = Path(__file__).resolve().parent
-    candidates.extend([
-        project_dir / 'hadoop',
-        Path('C:/hadoop'),
-    ])
-
-    for candidate in candidates:
-        if (candidate / 'bin' / 'winutils.exe').exists():
-            return candidate
-
-    return None
 
 def write_to_es(batch_df, batch_id):
     if batch_df.rdd.isEmpty():
@@ -38,28 +16,6 @@ def write_to_es(batch_df, batch_id):
         .option("es.index.auto.create", "true")
         .save()
     )
-
-if os.name == 'nt':
-    hadoop_home = resolve_hadoop_home()
-    if hadoop_home is not None:
-        os.environ['HADOOP_HOME'] = str(hadoop_home)
-        hadoop_bin = str(hadoop_home / 'bin')
-
-        # Ép Windows phải nhìn thấy file hadoop.dll/winutils.exe
-        current_path = os.environ.get('PATH', '')
-        if hadoop_bin.lower() not in current_path.lower():
-            os.environ['PATH'] = current_path + (';' if current_path else '') + hadoop_bin
-
-        if hasattr(os, 'add_dll_directory'):
-            os.add_dll_directory(hadoop_bin)
-    else:
-        print(
-            "[WARN] Khong tim thay winutils.exe. "
-            "Hay set bien moi truong HADOOP_HOME hoac dat vao ./hadoop/bin/winutils.exe"
-        )
-
-os.environ['PYSPARK_PYTHON'] = sys.executable
-os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
