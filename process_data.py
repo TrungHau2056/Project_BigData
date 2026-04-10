@@ -1,12 +1,18 @@
 import pandas as pd
 import json
 import time
+import os
 from kafka import KafkaProducer
+
+bootstrap_servers = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+topic_name = os.environ.get('TOPIC_NAME', 'ecommerce-events')
+file_path = os.environ.get('DATA_FILE', 'data/2019-Oct.csv')
+send_delay = float(os.environ.get('SEND_DELAY_SEC', '0.5'))
 
 print(" Connecting to Kafka...")
 try:
     producer = KafkaProducer(
-        bootstrap_servers=['localhost:9092'],
+        bootstrap_servers=[bootstrap_servers],
         value_serializer=lambda x: json.dumps(x).encode('utf-8')
     )
     
@@ -15,10 +21,6 @@ except Exception as e:
     print(f" Failed to connect to Kafka: {e}")
     exit()
     
-file_path = 'data/2019-Oct.csv'
-
-topic_name = 'ecommerce-events'
-
 print(f" Reading data from {file_path}...")
 
 try:
@@ -32,7 +34,7 @@ try:
             event_type = data_dict.get('event_type', 'N/A')
             product_id = data_dict.get('product_id', 'N/A')    
             print(f" Sent event: {event_time} | {event_type} | Product ID: {product_id}")
-            time.sleep(0.5)
+            time.sleep(send_delay)
 except FileNotFoundError:
     print(f" File not found: {file_path}")
 except KeyboardInterrupt:

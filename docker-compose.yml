@@ -1,6 +1,4 @@
-version: '3.8'
-
-services: 
+services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.0
     environment:
@@ -24,6 +22,41 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      TOPIC_NAME: ecommerce-events
+      DATA_FILE: data/2019-Oct.csv
+      SEND_DELAY_SEC: 0.5
+    command: ["python", "process_data.py"]
+    volumes:
+      - ./:/app
+
+  spark-streaming:
+    image: apache/spark:4.0.1
+    depends_on:
+      - kafka
+    working_dir: /app
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      TOPIC_NAME: ecommerce-events
+      SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1
+      - /app/spark_streaming.py
+    volumes:
+      - ./:/app
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.4.3
@@ -37,6 +70,8 @@ services:
   kibana:
     image: docker.elastic.co/kibana/kibana:8.4.3
     environment:
-      - elasticsearch 
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
     ports:
       - "5601:5601"
