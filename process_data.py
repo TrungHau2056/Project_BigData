@@ -13,7 +13,7 @@ print(" Connecting to Kafka...")
 try:
     producer = KafkaProducer(
         bootstrap_servers=[bootstrap_servers],
-        value_serializer=lambda x: json.dumps(x).encode('utf-8')
+        value_serializer=lambda x: json.dumps(x, allow_nan=False).encode('utf-8')
     )
     
     print(" Connected to Kafka successfully.")
@@ -26,8 +26,11 @@ print(f" Reading data from {file_path}...")
 try:
     for chunk in pd.read_csv(file_path, chunksize=1000):
         for index, row in chunk.iterrows():
-            
-            data_dict = row.to_dict()
+            # Convert pandas/numpy null-like values to JSON null for strict parsing in Spark.
+            data_dict = {
+                key: (None if pd.isna(value) else value.item() if hasattr(value, 'item') else value)
+                for key, value in row.to_dict().items()
+            }
             producer.send(topic_name, value=data_dict)
             
             event_time = data_dict.get('event_time', 'N/A')

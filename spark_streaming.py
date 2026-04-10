@@ -22,6 +22,22 @@ def resolve_hadoop_home():
 
     return None
 
+def write_to_es(batch_df, batch_id):
+    if batch_df.rdd.isEmpty():
+        print(f"Batch {batch_id} is empty. Skipping write to Elasticsearch.")
+        return
+
+    (
+        batch_df.write
+        .format("org.elasticsearch.spark.sql")
+        .mode("append")
+        .option("es.nodes", es_nodes)
+        .option("es.port", es_port)
+        .option("es.resource", es_index)
+        .option("es.nodes.wan.only", "true")
+        .option("es.index.auto.create", "true")
+        .save()
+    )
 
 if os.name == 'nt':
     hadoop_home = resolve_hadoop_home()
@@ -53,7 +69,7 @@ from pyspark.sql.functions import from_json, col
 # Create a SparkSession
 spark_kafka_package = os.environ.get(
     'SPARK_KAFKA_PACKAGE',
-    'org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1'
+    'org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3'
 )
 
 spark = SparkSession.builder \
@@ -84,6 +100,9 @@ schema = StructType([
 print("Đang lắng nghe luồng dữ liệu từ kafka topic 'ecommerce-events'...")
 kafka_bootstrap_servers = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
 topic_name = os.environ.get('TOPIC_NAME', 'ecommerce-events')
+es_nodes = os.environ.get('ES_NODES', 'elasticsearch')
+es_port = os.environ.get('ES_PORT', '9200')
+es_index = os.environ.get('ES_INDEX', 'ecommerce-events')
 
 kafka_df = spark.readStream \
     .format("kafka") \
@@ -103,11 +122,21 @@ parsed_df = kafka_df.selectExpr("CAST(value AS STRING)") \
 clean_df = parsed_df.filter(col("price").isNotNull())
 
 # In kết quả ra terminal
-print("Đang chờ dữ liệu chảy vào...")
-query = clean_df.writeStream \
-                .outputMode("append") \
-                .format("console") \
-                .option("truncate", "false") \
-                .start()
+print("Dang cho du lieu chay vao Elasticsearch...")
+query = (
+    clean_df.writeStream
+    .outputMode("append")
+    .foreachBatch(write_to_es)
+    .option("checkpointLocation", "/tmp/spark-checkpoints/ecommerce-events")
+    .start()
+)
+
+# debug_query = (
+#     clean_df.writeStream
+#     .outputMode("append")
+#     .format("console")
+#     .option("truncate", "false")
+#     .start()
+# )
 
 query.awaitTermination()

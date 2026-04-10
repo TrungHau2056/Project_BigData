@@ -40,20 +40,27 @@ services:
       - ./:/app
 
   spark-streaming:
-    image: apache/spark:4.0.1
+    image: apache/spark:3.5.1
     depends_on:
       - kafka
     working_dir: /app
     environment:
+      HOME: /tmp
+      ES_NODES: elasticsearch
+      ES_PORT: 9200
+      ES_INDEX: ecommerce-events
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       TOPIC_NAME: ecommerce-events
-      SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1
+      SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      
     command:
       - /opt/spark/bin/spark-submit
       - --master
       - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
       - --packages
-      - org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
       - /app/spark_streaming.py
     volumes:
       - ./:/app
