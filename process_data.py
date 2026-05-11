@@ -3,6 +3,7 @@ import json
 import time
 import os
 from kafka import KafkaProducer
+from datetime import datetime
 
 bootstrap_servers = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
 topic_name = os.environ.get('TOPIC_NAME', 'ecommerce-events')
@@ -10,16 +11,18 @@ file_path = os.environ.get('DATA_FILE', 'data/2019-Oct.csv')
 send_delay = float(os.environ.get('SEND_DELAY_SEC', '0.5'))
 
 print(" Connecting to Kafka...")
-try:
-    producer = KafkaProducer(
-        bootstrap_servers=[bootstrap_servers],
-        value_serializer=lambda x: json.dumps(x, allow_nan=False).encode('utf-8')
-    )
-    
-    print(" Connected to Kafka successfully.")
-except Exception as e:
-    print(f" Failed to connect to Kafka: {e}")
-    exit()
+while True:
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers=[bootstrap_servers],
+            value_serializer=lambda x: json.dumps(x, allow_nan=False).encode('utf-8')
+        )
+
+        print(" Connected to Kafka successfully.")
+        break
+    except Exception as e:
+        print(f" Failed to connect to Kafka: {e}")
+        time.sleep(5)
     
 print(f" Reading data from {file_path}...")
 
@@ -31,6 +34,10 @@ try:
                 key: (None if pd.isna(value) else value.item() if hasattr(value, 'item') else value)
                 for key, value in row.to_dict().items()
             }
+            if data_dict.get("event_time"):
+                dt = datetime.strptime(data_dict["event_time"], "%Y-%m-%d %H:%M:%S UTC")
+                data_dict["event_time"] = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
             producer.send(topic_name, value=data_dict)
             
             event_time = data_dict.get('event_time', 'N/A')

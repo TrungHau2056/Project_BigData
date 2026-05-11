@@ -19,7 +19,7 @@ def write_to_es(batch_df, batch_id):
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
-from pyspark.sql.functions import from_json, col
+from pyspark.sql.functions import from_json, col, to_timestamp
 
 
 # Create a SparkSession
@@ -66,17 +66,21 @@ kafka_df = spark.readStream \
     .option("subscribe", topic_name) \
     .option("startingOffsets", "latest") \
     .load()
-    
-    
+
 # Ép kiểu dữ liệu (chuyển mã hóa Binary của kafka -> chuỗi json và tách cột)
 
 parsed_df = kafka_df.selectExpr("CAST(value AS STRING)") \
                     .select(from_json(col("value"), schema).alias("data")) \
                     .select("data.*")
 
+parsed_df = parsed_df.withColumn(
+    "event_time",
+    to_timestamp(col("event_time"), "yyyy-MM-dd'T'HH:mm:ssX")
+)
+
 # Làm sạch data (Lọc bỏ những giá trị bị lỗi)
 clean_df = parsed_df.filter(col("price").isNotNull())
-
+clean_df.printSchema()
 # In kết quả ra terminal
 print("Dang cho du lieu chay vao Elasticsearch...")
 query = (
