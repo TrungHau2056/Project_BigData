@@ -19,7 +19,7 @@ def write_to_es(batch_df, batch_id):
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
-from pyspark.sql.functions import from_json, col, to_timestamp
+from pyspark.sql.functions import from_json, col, split, to_timestamp
 
 
 # Create a SparkSession
@@ -76,6 +76,14 @@ parsed_df = kafka_df.selectExpr("CAST(value AS STRING)") \
 parsed_df = parsed_df.withColumn(
     "event_time",
     to_timestamp(col("event_time"), "yyyy-MM-dd'T'HH:mm:ssX")
+)
+
+category_parts = split(col("category_code"), "\\.")
+parsed_df = (
+    parsed_df
+    .withColumn("category_l1", category_parts.getItem(0))
+    .withColumn("category_l2", category_parts.getItem(1))
+    .withColumn("category_l3", category_parts.getItem(2))
 )
 
 # Làm sạch data (Lọc bỏ những giá trị bị lỗi)

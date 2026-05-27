@@ -110,6 +110,13 @@ services:
                 \"type\": \"date\",
                 \"format\": \"strict_date_optional_time||epoch_millis\"
               },
+              \"event_type\": {\"type\": \"keyword\"},
+              \"category_code\": {\"type\": \"keyword\"},
+              \"category_l1\": {\"type\": \"keyword\"},
+              \"category_l2\": {\"type\": \"keyword\"},
+              \"category_l3\": {\"type\": \"keyword\"},
+              \"brand\": {\"type\": \"keyword\"},
+              \"user_session\": {\"type\": \"keyword\"},
               \"price\": {\"type\": \"float\"}
             }
           }
