@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . /app
 
-CMD ["python", "process_data.py"]
+CMD ["python", "stream_replay.py"]

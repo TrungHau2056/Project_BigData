@@ -1,4 +1,7 @@
 services:
+  # ==========================================
+  # Infrastructure
+  # ==========================================
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.0
     environment:
@@ -24,46 +27,28 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
 
-  producer:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    depends_on:
-      - kafka
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      TOPIC_NAME: ecommerce-events
-      DATA_FILE: data/2019-Oct.csv
-      SEND_DELAY_SEC: 0.5
-    command: ["python", "process_data.py"]
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
     volumes:
-      - ./:/app
+      - minio-data:/data
 
-  spark-streaming:
-    image: apache/spark:3.5.1
+  minio-init:
+    image: minio/mc:latest
     depends_on:
-      - kafka
-    working_dir: /app
-    environment:
-      HOME: /tmp
-      ES_NODES: elasticsearch
-      ES_PORT: 9200
-      ES_INDEX: ecommerce-events
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      TOPIC_NAME: ecommerce-events
-      SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
-      
-    command:
-      - /opt/spark/bin/spark-submit
-      - --master
-      - local[*]
-      - --conf
-      - spark.jars.ivy=/tmp/.ivy2
-      - --packages
-      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
-      - /app/spark_streaming.py
-    volumes:
-      - ./:/app
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/ecommerce-datalake --ignore-existing;
+      echo 'Bucket created successfully';
+      "
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.4.3
@@ -82,3 +67,269 @@ services:
       - elasticsearch
     ports:
       - "5601:5601"
+
+  # ==========================================
+  # Data Pipeline (Batch Layer)
+  # ==========================================
+  ingest-to-lake:
+    image: apache/spark:3.5.1
+    depends_on:
+      - minio-init
+    working_dir: /app
+    environment:
+      HOME: /tmp
+      DATA_FILE: data/2019-Oct.csv
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: ecommerce-datalake
+      SPARK_PACKAGES: org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --conf
+      - spark.driver.memory=2g
+      - --packages
+      - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
+      - /app/ingest_to_lake.py
+    volumes:
+      - ./:/app
+
+  feature-engineering:
+    image: apache/spark:3.5.1
+    depends_on:
+      - minio-init
+    working_dir: /app
+    environment:
+      HOME: /tmp
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: ecommerce-datalake
+      ES_NODES: elasticsearch
+      ES_PORT: 9200
+      SPARK_PACKAGES: org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --conf
+      - spark.driver.memory=2g
+      - --packages
+      - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      - /app/feature_engineering.py
+    volumes:
+      - ./:/app
+
+  stream-replay:
+    image: apache/spark:3.5.1
+    depends_on:
+      - kafka
+    working_dir: /app
+    environment:
+      HOME: /tmp
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      TOPIC_NAME: ecommerce-events
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: ecommerce-datalake
+      EVENTS_PER_SEC: 1000
+      SPARK_PACKAGES: org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --conf
+      - spark.driver.memory=2g
+      - --packages
+      - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
+      - /app/stream_replay.py
+    volumes:
+      - ./:/app
+
+  # ==========================================
+  # Batch Processing
+  # ==========================================
+  spark-batch:
+    image: apache/spark:3.5.1
+    depends_on:
+      - elasticsearch
+    working_dir: /app
+    environment:
+      HOME: /tmp
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: ecommerce-datalake
+      ES_NODES: elasticsearch
+      ES_PORT: 9200
+      SPARK_PACKAGES: org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --conf
+      - spark.driver.memory=2g
+      - --packages
+      - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      - /app/spark_batch.py
+    volumes:
+      - ./:/app
+
+  customer-segmentation:
+    image: apache/spark:3.5.1
+    depends_on:
+      - elasticsearch
+    working_dir: /app
+    environment:
+      HOME: /tmp
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: ecommerce-datalake
+      ES_NODES: elasticsearch
+      ES_PORT: 9200
+      NUM_CLUSTERS: 4
+      SPARK_PACKAGES: org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --conf
+      - spark.driver.memory=2g
+      - --packages
+      - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      - /app/customer_segmentation.py
+    volumes:
+      - ./:/app
+
+  # ==========================================
+  # Streaming Processing (Speed Layer)
+  # ==========================================
+  spark-streaming:
+    image: apache/spark:3.5.1
+    depends_on:
+      - kafka
+    working_dir: /app
+    environment:
+      HOME: /tmp
+      ES_NODES: elasticsearch
+      ES_PORT: 9200
+      ES_INDEX: ecommerce-events
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      TOPIC_NAME: ecommerce-events
+      WINDOW_DURATION: 5 minutes
+      WATERMARK_DELAY: 10 minutes
+      SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      - /app/spark_streaming.py
+    volumes:
+      - ./:/app
+
+  spark-anomaly:
+    image: apache/spark:3.5.1
+    depends_on:
+      - kafka
+      - elasticsearch
+    working_dir: /app
+    environment:
+      HOME: /tmp
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      TOPIC_NAME: ecommerce-events
+      ES_NODES: elasticsearch
+      ES_PORT: 9200
+      SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      - /app/streaming_anomaly.py
+    volumes:
+      - ./:/app
+
+  # ==========================================
+  # Orchestration (Airflow)
+  # ==========================================
+  airflow-init:
+    image: apache/airflow:2.8.1
+    depends_on:
+      - elasticsearch
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: airflow
+      _AIRFLOW_WWW_USER_PASSWORD: airflow
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow-data:/opt/airflow
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: /bin/bash -c "airflow db migrate && airflow users create --username airflow --password airflow --firstname Air --lastname Flow --role Admin --email admin@example.com"
+
+  airflow-webserver:
+    image: apache/airflow:2.8.1
+    depends_on:
+      - airflow-init
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow-data:/opt/airflow
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: webserver
+    restart: unless-stopped
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1
+    depends_on:
+      - airflow-init
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow-data:/opt/airflow
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: scheduler
+    restart: unless-stopped
+
+volumes:
+  minio-data:
+  airflow-data:
