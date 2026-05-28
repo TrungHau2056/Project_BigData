@@ -3,3 +3,4 @@
 __pycache__/
 CLAUDE.md
 GUIDE.md
+.ivy-cache/

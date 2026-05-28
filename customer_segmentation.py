@@ -5,6 +5,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, sum as spark_sum, count as spark_count, avg, when, lit,
     round as spark_round, datediff, max as spark_max, min as spark_min,
+    countDistinct, create_map,
 )
 from pyspark.ml.feature import VectorAssembler, StandardScaler
 from pyspark.ml.clustering import KMeans
@@ -83,7 +84,7 @@ def compute_rfm(df):
             spark_count("*").alias("frequency"),
             spark_round(spark_sum("price"), 2).alias("monetary"),
             spark_round(avg("price"), 2).alias("avg_order_value"),
-            spark_countDistinct("product_id").alias("unique_products"),
+            countDistinct("product_id").alias("unique_products"),
         )
     )
     return rfm
@@ -161,18 +162,13 @@ def label_segments(predictions, centers):
     from pyspark.sql.functions import udf
     from pyspark.sql.types import StringType
 
-    label_map = spark_create_map([lit(x) for pair in labels.items() for x in pair])
+    label_map = create_map([lit(x) for pair in labels.items() for x in pair])
 
     result = predictions.withColumn(
         "segment_label",
         label_map[col("segment")]
     )
     return result
-
-
-def spark_create_map(cols):
-    from pyspark.sql.functions import create_map
-    return create_map(*cols)
 
 
 def compute_segment_summary(predictions):

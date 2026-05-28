@@ -5,7 +5,8 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     from_json, col, to_timestamp, sum, count, avg, stddev,
     window, lit, abs as spark_abs, when,
-    round as spark_round, countDistinct, current_timestamp,
+    round as spark_round, approx_count_distinct, current_timestamp,
+    regexp_replace,
 )
 from pyspark.sql.types import DoubleType
 
@@ -29,9 +30,7 @@ CONFIG = {
     "checkpoint_location": os.environ.get("CHECKPOINT_LOCATION", "/tmp/spark-checkpoints/anomaly"),
 }
 
-# Anomaly thresholds
 PRICE_ZSCORE_THRESHOLD = float(os.environ.get("PRICE_ZSCORE_THRESHOLD", "2.0"))
-VOLUME_SPIKE_FACTOR = float(os.environ.get("VOLUME_SPIKE_FACTOR", "3.0"))
 SESSION_EVENT_LIMIT = int(os.environ.get("SESSION_EVENT_LIMIT", "100"))
 
 
@@ -63,12 +62,105 @@ def write_anomalies_to_es(batch_df, batch_id):
     logger.info(f"Anomaly batch {batch_id}: wrote {batch_df.count()} anomalies to ES.")
 
 
+def detect_anomalies(batch_df, batch_id):
+    if batch_df.rdd.isEmpty():
+        logger.info(f"Anomaly batch {batch_id} is empty. Skipping.")
+        return
+
+    anomalies = []
+
+    # Price anomaly: z-score > threshold vs category average
+    with_cat = batch_df.filter(col("category_code").isNotNull())
+    if not with_cat.rdd.isEmpty():
+        price_stats = with_cat.groupBy("category_code").agg(
+            avg("price").alias("cat_avg_price"),
+            stddev("price").alias("cat_std_price"),
+        ).filter(col("cat_std_price").isNotNull() & (col("cat_std_price") > 0))
+
+        price_anomalies = (
+            with_cat
+            .join(price_stats, "category_code", "left")
+            .filter(
+                col("cat_std_price").isNotNull() &
+                (col("cat_std_price") > 0) &
+                (spark_abs(col("price") - col("cat_avg_price")) / col("cat_std_price") > PRICE_ZSCORE_THRESHOLD)
+            )
+            .select(
+                current_timestamp().alias("processing_time"),
+                col("event_time"),
+                col("product_id"),
+                col("category_code"),
+                col("price"),
+                col("cat_avg_price"),
+                col("cat_std_price"),
+                spark_round(
+                    spark_abs(col("price") - col("cat_avg_price")) / col("cat_std_price"), 2
+                ).alias("z_score"),
+                lit("price_anomaly").alias("anomaly_type"),
+            )
+        )
+        anomalies.append(price_anomalies)
+
+    # Suspicious session: too many events per session
+    with_session = batch_df.filter(col("user_session").isNotNull())
+    if not with_session.rdd.isEmpty():
+        session_stats = (
+            with_session
+            .groupBy("user_session", "user_id")
+            .agg(count("*").alias("event_count"))
+            .filter(col("event_count") > SESSION_EVENT_LIMIT)
+            .select(
+                current_timestamp().alias("processing_time"),
+                col("user_session"),
+                col("user_id"),
+                col("event_count"),
+                lit("suspicious_session").alias("anomaly_type"),
+            )
+        )
+        anomalies.append(session_stats)
+
+    # Volume anomaly: flag if batch has high event count per category
+    volume_stats = (
+        batch_df
+        .filter(col("category_code").isNotNull())
+        .groupBy("category_code")
+        .agg(count("*").alias("event_count"))
+        .filter(col("event_count") > 50)
+        .select(
+            current_timestamp().alias("processing_time"),
+            col("category_code"),
+            col("event_count"),
+            lit("volume_spike").alias("anomaly_type"),
+        )
+    )
+    if not volume_stats.rdd.isEmpty():
+        anomalies.append(volume_stats)
+
+    if anomalies:
+        # Union all anomaly types (add missing columns with nulls for schema compatibility)
+        from functools import reduce
+        all_anomalies = reduce(lambda a, b: a.unionByName(b, allowMissingColumns=True), anomalies)
+        anomaly_count = all_anomalies.count()
+        if anomaly_count > 0:
+            (
+                all_anomalies.write
+                .format("org.elasticsearch.spark.sql")
+                .mode("append")
+                .option("es.nodes", CONFIG["es_nodes"])
+                .option("es.port", CONFIG["es_port"])
+                .option("es.resource", "streaming-anomalies")
+                .option("es.nodes.wan.only", "true")
+                .option("es.index.auto.create", "true")
+                .save()
+            )
+            logger.info(f"Anomaly batch {batch_id}: wrote {anomaly_count} anomalies to ES.")
+
+
 def main():
     logger.info("Starting Streaming Anomaly Detection...")
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
 
-    # Read from Kafka
     logger.info(f"Listening to Kafka topic '{CONFIG['topic_name']}'...")
     kafka_df = (
         spark.readStream
@@ -85,136 +177,27 @@ def main():
         .select("data.*")
     )
 
-    clean_df = parsed_df.filter(col("price").isNotNull())
-
-    # Add timestamp for windowing
-    with_ts = clean_df.withColumn(
-        "event_timestamp",
-        to_timestamp(col("event_time"), "yyyy-MM-dd HH:mm:ss")
-    ).withColumn("processing_time", current_timestamp())
-
-    # === Anomaly 1: Price Anomaly ===
-    # Products with price significantly different from category average (z-score)
-    price_stats = (
-        with_ts
-        .filter(col("category_code").isNotNull())
-        .withWatermark("event_timestamp", "10 minutes")
-        .groupBy(
-            window(col("event_timestamp"), "10 minutes"),
-            col("category_code"),
-        )
-        .agg(
-            avg("price").alias("cat_avg_price"),
-            stddev("price").alias("cat_std_price"),
+    clean_df = (
+        parsed_df
+        .filter(col("price").isNotNull())
+        .withColumn(
+            "event_timestamp",
+            to_timestamp(
+                regexp_replace(col("event_time"), r"\s+UTC$", ""),
+                "yyyy-MM-dd HH:mm:ss",
+            )
         )
     )
 
-    price_anomalies = (
-        with_ts
-        .filter(col("category_code").isNotNull())
-        .join(
-            price_stats,
-            (window(with_ts["event_timestamp"], "10 minutes") == price_stats["window"]) &
-            (with_ts["category_code"] == price_stats["category_code"]),
-            "left"
-        )
-        .filter(
-            col("cat_std_price").isNotNull() &
-            (col("cat_std_price") > 0) &
-            (spark_abs(col("price") - col("cat_avg_price")) / col("cat_std_price") > PRICE_ZSCORE_THRESHOLD)
-        )
-        .select(
-            col("processing_time"),
-            col("event_time"),
-            col("product_id"),
-            col("category_code"),
-            col("price"),
-            col("cat_avg_price"),
-            col("cat_std_price"),
-            spark_round(
-                spark_abs(col("price") - col("cat_avg_price")) / col("cat_std_price"), 2
-            ).alias("z_score"),
-            lit("price_anomaly").alias("anomaly_type"),
-        )
-    )
-
-    # === Anomaly 2: Volume Spike ===
-    # Event count spike (potential bot attack)
-    volume_current = (
-        with_ts
-        .withWatermark("event_timestamp", "5 minutes")
-        .groupBy(window(col("event_timestamp"), "5 minutes"))
-        .agg(count("*").alias("current_count"))
-    )
-
-    volume_anomalies = (
-        volume_current
-        .filter(col("current_count") > 100)  # Only flag if meaningful volume
-        .select(
-            col("window.start").alias("window_start"),
-            col("window.end").alias("window_end"),
-            col("current_count").alias("event_count"),
-            lit("volume_spike").alias("anomaly_type"),
-            current_timestamp().alias("processing_time"),
-        )
-    )
-
-    # === Anomaly 3: Suspicious Session ===
-    # Too many events per session in a short time
-    session_anomalies = (
-        with_ts
-        .filter(col("user_session").isNotNull())
-        .withWatermark("event_timestamp", "1 minute")
-        .groupBy(
-            window(col("event_timestamp"), "1 minute"),
-            col("user_session"),
-            col("user_id"),
-        )
-        .agg(count("*").alias("event_count"))
-        .filter(col("event_count") > SESSION_EVENT_LIMIT)
-        .select(
-            col("window.start").alias("window_start"),
-            col("window.end").alias("window_end"),
-            col("user_session"),
-            col("user_id"),
-            col("event_count"),
-            lit("suspicious_session").alias("anomaly_type"),
-            current_timestamp().alias("processing_time"),
-        )
-    )
-
-    # Combine all anomalies
-    # Note: Can't union streaming DataFrames with different schemas easily,
-    # so we write each anomaly type separately
-
-    # Start queries
-    logger.info("Starting anomaly detection queries...")
-
-    price_query = (
-        price_anomalies.writeStream
+    query = (
+        clean_df.writeStream
         .outputMode("append")
-        .foreachBatch(write_anomalies_to_es)
-        .option("checkpointLocation", f"{CONFIG['checkpoint_location']}/price")
+        .foreachBatch(detect_anomalies)
+        .option("checkpointLocation", f"{CONFIG['checkpoint_location']}/all")
         .start()
     )
 
-    volume_query = (
-        volume_anomalies.writeStream
-        .outputMode("append")
-        .foreachBatch(write_anomalies_to_es)
-        .option("checkpointLocation", f"{CONFIG['checkpoint_location']}/volume")
-        .start()
-    )
-
-    session_query = (
-        session_anomalies.writeStream
-        .outputMode("append")
-        .foreachBatch(write_anomalies_to_es)
-        .option("checkpointLocation", f"{CONFIG['checkpoint_location']}/session")
-        .start()
-    )
-
-    logger.info("Anomaly detection queries started. Waiting for data...")
+    logger.info("Anomaly detection query started. Waiting for data...")
     spark.streams.awaitAnyTermination()
 
 

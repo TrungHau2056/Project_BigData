@@ -4,7 +4,8 @@ import logging
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     from_json, col, to_timestamp, sum, count,
-    window, round as spark_round, countDistinct,
+    window, round as spark_round, approx_count_distinct,
+    regexp_replace,
 )
 
 from schemas import ECOMMERCE_SCHEMA
@@ -119,7 +120,10 @@ def main():
         clean_df
         .withColumn(
             "event_timestamp",
-            to_timestamp(col("event_time"), "yyyy-MM-dd HH:mm:ss")
+            to_timestamp(
+                regexp_replace(col("event_time"), r"\s+UTC$", ""),
+                "yyyy-MM-dd HH:mm:ss",
+            )
         )
         .withWatermark("event_timestamp", config["watermark_delay"])
         .groupBy(
@@ -129,7 +133,7 @@ def main():
         .agg(
             spark_round(sum("price"), 2).alias("total_revenue"),
             count("*").alias("event_count"),
-            countDistinct("user_id").alias("unique_users"),
+            approx_count_distinct("user_id").alias("unique_users"),
         )
         .select(
             col("window.start").alias("window_start"),

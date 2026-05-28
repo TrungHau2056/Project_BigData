@@ -97,6 +97,7 @@ services:
       - /app/ingest_to_lake.py
     volumes:
       - ./:/app
+      - ./.ivy-cache:/tmp/.ivy2
 
   feature-engineering:
     image: apache/spark:3.5.1
@@ -125,6 +126,7 @@ services:
       - /app/feature_engineering.py
     volumes:
       - ./:/app
+      - ./.ivy-cache:/tmp/.ivy2
 
   stream-replay:
     image: apache/spark:3.5.1
@@ -154,6 +156,7 @@ services:
       - /app/stream_replay.py
     volumes:
       - ./:/app
+      - ./.ivy-cache:/tmp/.ivy2
 
   # ==========================================
   # Batch Processing
@@ -185,6 +188,7 @@ services:
       - /app/spark_batch.py
     volumes:
       - ./:/app
+      - ./.ivy-cache:/tmp/.ivy2
 
   customer-segmentation:
     image: apache/spark:3.5.1
@@ -201,19 +205,10 @@ services:
       ES_PORT: 9200
       NUM_CLUSTERS: 4
       SPARK_PACKAGES: org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
-    command:
-      - /opt/spark/bin/spark-submit
-      - --master
-      - local[*]
-      - --conf
-      - spark.jars.ivy=/tmp/.ivy2
-      - --conf
-      - spark.driver.memory=2g
-      - --packages
-      - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
-      - /app/customer_segmentation.py
+    entrypoint: /bin/bash -c "pip install numpy && /opt/spark/bin/spark-submit --master local[*] --conf spark.jars.ivy=/tmp/.ivy2 --conf spark.driver.memory=2g --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3 /app/customer_segmentation.py"
     volumes:
       - ./:/app
+      - ./.ivy-cache:/tmp/.ivy2
 
   # ==========================================
   # Streaming Processing (Speed Layer)
@@ -244,6 +239,7 @@ services:
       - /app/spark_streaming.py
     volumes:
       - ./:/app
+      - ./.ivy-cache:/tmp/.ivy2
 
   spark-anomaly:
     image: apache/spark:3.5.1
@@ -269,6 +265,7 @@ services:
       - /app/streaming_anomaly.py
     volumes:
       - ./:/app
+      - ./.ivy-cache:/tmp/.ivy2
 
   # ==========================================
   # Orchestration (Airflow)
