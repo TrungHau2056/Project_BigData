@@ -13,6 +13,12 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:7.3.0
+    healthcheck:
+       test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+       interval: 10s
+       timeout: 5s
+       retries: 10
+       start_period: 20s
     depends_on:
       - zookeeper
     ports:
@@ -27,8 +33,37 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
 
+  kafka-init:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c "
+      echo 'Creating topic ecommerce-events...';
+    
+      kafka-topics \
+      --create \
+      --topic ecommerce-events \
+      --bootstrap-server kafka:29092 \
+      --partitions 1 \
+      --replication-factor 1;
+
+      echo '-----------------------------------';
+      echo 'Verifying topic list:';
+      kafka-topics --list --bootstrap-server kafka:29092;
+      echo '-----------------------------------';
+      echo 'Kafka topic setup complete.';
+      "
+    restart: "no"
+
   minio:
     image: minio/minio:latest
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -52,6 +87,12 @@ services:
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.4.3
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fs http://localhost:9200 >/dev/null || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -64,7 +105,8 @@ services:
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
     depends_on:
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
     ports:
       - "5601:5601"
 
@@ -74,7 +116,11 @@ services:
   ingest-to-lake:
     image: apache/spark:3.5.1
     depends_on:
-      - minio-init
+      minio-init:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+
     working_dir: /app
     environment:
       HOME: /tmp
@@ -102,7 +148,10 @@ services:
   feature-engineering:
     image: apache/spark:3.5.1
     depends_on:
-      - minio-init
+      minio-init:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
     working_dir: /app
     environment:
       HOME: /tmp
@@ -131,7 +180,12 @@ services:
   stream-replay:
     image: apache/spark:3.5.1
     depends_on:
-      - kafka
+      kafka-init:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+      spark-streaming:
+        condition: service_started
     working_dir: /app
     environment:
       HOME: /tmp
@@ -216,7 +270,10 @@ services:
   spark-streaming:
     image: apache/spark:3.5.1
     depends_on:
-      - kafka
+      kafka-init:
+        condition: service_completed_successfully
+      elasticsearch:
+        condition: service_healthy
     working_dir: /app
     environment:
       HOME: /tmp
@@ -244,8 +301,10 @@ services:
   spark-anomaly:
     image: apache/spark:3.5.1
     depends_on:
-      - kafka
-      - elasticsearch
+      kafka-init:
+        condition: service_completed_successfully
+      elasticsearch:
+        condition: service_healthy
     working_dir: /app
     environment:
       HOME: /tmp
