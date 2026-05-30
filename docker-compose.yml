@@ -2,39 +2,33 @@ services:
   # ==========================================
   # Infrastructure
   # ==========================================
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.3.0
-    environment:
-      ZOOKEEPER_SERVER_ID: 1
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_SERVERS: zookeeper:2888:3888
-    ports:
-      - "2181:2181"
 
   kafka:
-    image: confluentinc/cp-kafka:7.3.0
-    healthcheck:
-       test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
-       interval: 10s
-       timeout: 5s
-       retries: 10
-       start_period: 20s
-    depends_on:
-      - zookeeper
+    image: confluentinc/cp-kafka:7.6.1
     ports:
       - "9092:9092"
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:29092
+      KAFKA_NODE_ID: 1
+      CLUSTER_ID: QlIHWhbmSMWCMubdAfweUw
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
       KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9092,INTERNAL://kafka:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    healthcheck:
+      test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   kafka-init:
-    image: confluentinc/cp-kafka:7.3.0
+    image: confluentinc/cp-kafka:7.6.1
     depends_on:
       kafka:
         condition: service_healthy
@@ -188,6 +182,7 @@ services:
         condition: service_started
     working_dir: /app
     environment:
+      PYTHONPATH: /app
       HOME: /tmp
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       TOPIC_NAME: ecommerce-events
@@ -207,7 +202,7 @@ services:
       - spark.driver.memory=2g
       - --packages
       - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
-      - /app/stream_replay.py
+      - /app/streaming/stream_replay.py
     volumes:
       - ./:/app
       - ./.ivy-cache:/tmp/.ivy2
@@ -285,6 +280,7 @@ services:
       WINDOW_DURATION: 5 minutes
       WATERMARK_DELAY: 10 minutes
       SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      PYTHONPATH: /app
     command:
       - /opt/spark/bin/spark-submit
       - --master
@@ -293,7 +289,7 @@ services:
       - spark.jars.ivy=/tmp/.ivy2
       - --packages
       - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
-      - /app/spark_streaming.py
+      - /app/streaming/spark_streaming.py
     volumes:
       - ./:/app
       - ./.ivy-cache:/tmp/.ivy2
@@ -307,6 +303,7 @@ services:
         condition: service_healthy
     working_dir: /app
     environment:
+      PYTHONPATH: /app
       HOME: /tmp
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       TOPIC_NAME: ecommerce-events
@@ -321,7 +318,7 @@ services:
       - spark.jars.ivy=/tmp/.ivy2
       - --packages
       - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
-      - /app/streaming_anomaly.py
+      - /app/streaming/streaming_anomaly.py
     volumes:
       - ./:/app
       - ./.ivy-cache:/tmp/.ivy2
