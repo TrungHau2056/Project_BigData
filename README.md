@@ -145,31 +145,22 @@ MinIO → Stream Replay → Kafka (ecommerce-events)
 
 ## Cài đặt và chạy
 
-### Yêu cầu hệ thống
-
-| Tài nguyên | Tối thiểu | Khuyến nghị |
-|------------|-----------|-------------|
-| RAM | 8 GB | 16 GB |
-| CPU | 4 cores | 6-8 cores |
-| Disk | 50 GB free | 150 GB free |
-| Docker Desktop | ✅ | Phiên bản mới nhất |
-
 ### Bước 1: Khởi động hạ tầng
 
 ```bash
 # Dừng và cleanup (nếu có)
 docker compose down --remove-orphans
 
-# Build stream-replay image
-docker compose build stream-replay
-
 # Start Zookeeper + Kafka
 docker compose up -d zookeeper kafka
+
+# Explicitly create topic named "ecommerce-events"
+docker compose up kafka-init
 
 # Start MinIO (tự động tạo bucket ecommerce-datalake)
 docker compose up -d minio
 
-# Chờ 30 giây cho services ready
+
 ```
 
 **Kiểm tra**:
