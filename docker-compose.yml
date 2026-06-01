@@ -172,7 +172,7 @@ services:
       - ./.ivy-cache:/tmp/.ivy2
 
   stream-replay:
-    image: apache/spark:3.5.1
+    image: python:3.11-slim
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -182,31 +182,19 @@ services:
         condition: service_started
     working_dir: /app
     environment:
-      PYTHONPATH: /app
-      HOME: /tmp
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       TOPIC_NAME: ecommerce-events
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       MINIO_BUCKET: ecommerce-datalake
-      EVENTS_PER_SEC: 1000
-      SPARK_PACKAGES: org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
-    command:
-      - /opt/spark/bin/spark-submit
-      - --master
-      - local[*]
-      - --conf
-      - spark.jars.ivy=/tmp/.ivy2
-      - --conf
-      - spark.driver.memory=2g
-      - --packages
-      - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
-      - /app/streaming/stream_replay.py
+      REPLAY_START_DATE: "2019-10-25"
+      MAX_GAP_SECONDS: "5.0"
+    command: >
+      bash -c "pip install pyarrow kafka-python --quiet &&
+               python streaming/stream_replay.py"
     volumes:
       - ./:/app
-      - ./.ivy-cache:/tmp/.ivy2
-
   # ==========================================
   # Batch Processing
   # ==========================================

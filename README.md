@@ -152,7 +152,7 @@ MinIO → Stream Replay → Kafka (ecommerce-events)
 docker compose down --remove-orphans
 
 # Start Zookeeper + Kafka
-docker compose up -d zookeeper kafka
+docker compose up -d kafka
 
 # Explicitly create topic named "ecommerce-events"
 docker compose up kafka-init
