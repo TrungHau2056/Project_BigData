@@ -4,10 +4,10 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     from_json, col, to_timestamp, sum, count,
     window, round as spark_round, approx_count_distinct,
-    regexp_replace,
+    regexp_replace, date_format
 )
 
-from schemas import ECOMMERCE_SCHEMA
+from schemas import EVENT_SCHEMA
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +35,7 @@ def write_to_elasticsearch(batch_df, batch_id):
         logger.info(f"Batch {batch_id} is empty. Skipping.")
         return
     config = CONFIG
+    batch_df = batch_df.withColumn("event_time", date_format(col("event_time"), "yyyy-MM-dd'T'HH:mm:ss" ))
     (
         batch_df.write
         .format("org.elasticsearch.spark.sql")
@@ -47,6 +48,8 @@ def write_to_elasticsearch(batch_df, batch_id):
         .save()
     )
     logger.info(f"Batch {batch_id}: wrote {batch_df.count()} raw events to ES.")
+    batch_df.show(5, False)
+
 
 
 def write_windowed_to_elasticsearch(batch_df, batch_id):
@@ -54,6 +57,17 @@ def write_windowed_to_elasticsearch(batch_df, batch_id):
         logger.info(f"Windowed batch {batch_id} is empty. Skipping.")
         return
     config = CONFIG
+    batch_df = (
+        batch_df
+        .withColumn(
+            "window_start",
+            date_format(col("window_start"), "yyyy-MM-dd'T'HH:mm:ss")
+        )
+        .withColumn(
+            "window_end",
+            date_format(col("window_end"), "yyyy-MM-dd'T'HH:mm:ss")
+        )
+    )
     (
         batch_df.write
         .format("org.elasticsearch.spark.sql")
@@ -99,34 +113,32 @@ def main():
 
     parsed_df = (
         kafka_df.selectExpr("CAST(value AS STRING)")
-        .select(from_json(col("value"), ECOMMERCE_SCHEMA).alias("data"))
+        .select(from_json(col("value"), EVENT_SCHEMA).alias("data"))
         .select("data.*")
     )
+    parsed_df.printSchema()
 
     clean_df = parsed_df.filter(col("price").isNotNull())
+    clean_df.printSchema()
+
 
     # --- Query 1: Raw events to ES (original behavior) ---
     raw_query = (
         clean_df.writeStream
+        .format("console")
         .outputMode("append")
         .foreachBatch(write_to_elasticsearch)
         .option("checkpointLocation", f"{config['checkpoint_location']}/raw")
+        .option("truncate", False)
         .start()
-    )
+    )``
 
     # --- Query 2: Windowed aggregations ---
     windowed_df = (
         clean_df
-        .withColumn(
-            "event_timestamp",
-            to_timestamp(
-                regexp_replace(col("event_time"), r"\s+UTC$", ""),
-                "yyyy-MM-dd HH:mm:ss",
-            )
-        )
-        .withWatermark("event_timestamp", config["watermark_delay"])
+        .withWatermark("event_time", config["watermark_delay"])
         .groupBy(
-            window(col("event_timestamp"), config["window_duration"]),
+            window(col("event_time"), config["window_duration"]),
             col("event_type"),
         )
         .agg(
