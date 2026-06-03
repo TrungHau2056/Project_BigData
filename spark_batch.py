@@ -5,7 +5,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, sum, count, avg, desc, to_timestamp, to_date,
     hour, when, lit, round as spark_round, countDistinct,
-    regexp_replace,
+    regexp_replace, date_trunc
 )
 
 logging.basicConfig(
@@ -45,7 +45,7 @@ def create_spark_session() -> SparkSession:
 
 
 def write_to_es(df, index_name: str):
-    logger.info(f"Writing {df.count()} rows to ES index '{index_name}'...")
+    logger.info(f"Writing god knows many rows to ES index '{index_name}'...")
     (
         df.write
         .format("org.elasticsearch.spark.sql")
@@ -64,7 +64,11 @@ def revenue_by_category(purchases):
     return (
         purchases
         .filter(col("category_code").isNotNull())
-        .groupBy("category_code")
+        .groupBy(
+            "category_level_1",
+            "category_level_2",
+            "category_level_3"
+        )
         .agg(
             spark_round(sum("price"), 2).alias("total_revenue"),
             count("*").alias("order_count"),
@@ -72,7 +76,6 @@ def revenue_by_category(purchases):
         )
         .orderBy(desc("total_revenue"))
     )
-
 
 def revenue_by_brand(purchases):
     return (
@@ -89,25 +92,38 @@ def revenue_by_brand(purchases):
 
 
 def daily_revenue(purchases):
-    return (
+
+    daily = (
         purchases
-        .withColumn(
-            "event_date",
-            to_date(
-                regexp_replace(col("event_time"), r"\s+UTC$", ""),
-                "yyyy-MM-dd HH:mm:ss",
-            )
-        )
-        .filter(col("event_date").isNotNull())
+        .withColumn("event_date", to_date(col("event_time")))
         .groupBy("event_date")
         .agg(
             spark_round(sum("price"), 2).alias("total_revenue"),
             count("*").alias("order_count"),
             countDistinct("user_id").alias("unique_buyers"),
+            spark_round(avg("price"), 2).alias("aov"),
         )
         .orderBy("event_date")
     )
 
+    return daily
+
+def weekly_revenue(purchases):
+    weekly = (
+        purchases
+        .withColumn(
+            "week_start",
+            date_trunc("week", col("event_time"))
+        )
+        .groupBy("week_start")
+        .agg(
+            spark_round(sum("price"), 2).alias("total_revenue"),
+            count("*").alias("order_count"),
+            countDistinct("user_id").alias("unique_buyers"),
+        )
+        .orderBy("week_start")
+    )
+    return weekly
 
 def conversion_funnel(df):
     counts = df.groupBy("event_type").count()
@@ -137,12 +153,7 @@ def hourly_activity(df):
         df
         .withColumn(
             "event_hour",
-            hour(
-                to_timestamp(
-                    regexp_replace(col("event_time"), r"\s+UTC$", ""),
-                    "yyyy-MM-dd HH:mm:ss",
-                )
-            )
+            hour(col("event_time"))
         )
         .filter(col("event_hour").isNotNull())
         .groupBy("event_hour", "event_type")
@@ -176,8 +187,9 @@ def main():
     logger.info("Computing revenue by brand...")
     write_to_es(revenue_by_brand(purchases), "batch-revenue-brand")
 
-    logger.info("Computing daily revenue trend...")
+    logger.info("Computing daily and weekly revenue trend...")
     write_to_es(daily_revenue(purchases), "batch-daily-revenue")
+    write_to_es(weekly_revenue(purchases), "batch-weekly-revenue")
 
     logger.info("Computing conversion funnel...")
     write_to_es(conversion_funnel(df), "batch-conversion-funnel")

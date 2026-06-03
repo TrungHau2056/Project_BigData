@@ -4,7 +4,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     from_json, col, to_timestamp, sum, count,
     window, round as spark_round, approx_count_distinct,
-    regexp_replace, date_format
+    to_date, date_format
 )
 
 from schemas import EVENT_SCHEMA
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 CONFIG = {
     "spark_kafka_package": os.environ.get(
         "SPARK_KAFKA_PACKAGE",
-        "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3"
+        "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
     ),
     "kafka_bootstrap_servers": os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
     "topic_name": os.environ.get("TOPIC_NAME", "ecommerce-events"),
@@ -28,6 +28,10 @@ CONFIG = {
     "checkpoint_location": os.environ.get("CHECKPOINT_LOCATION", "/tmp/spark-checkpoints/ecommerce-events"),
     "window_duration": os.environ.get("WINDOW_DURATION", "5 minutes"),
     "watermark_delay": os.environ.get("WATERMARK_DELAY", "10 minutes"),
+    "minio_endpoint": os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
+    "minio_access_key": os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
+    "minio_secret_key": os.environ.get("MINIO_SECRET_KEY", "minioadmin"),
+    "minio_bucket": os.environ.get("MINIO_BUCKET", "ecommerce-datalake"),
 }
 
 def write_to_elasticsearch(batch_df, batch_id):
@@ -89,6 +93,12 @@ def create_spark_session() -> SparkSession:
         .config("spark.jars.packages", CONFIG["spark_kafka_package"])
         .config("spark.driver.host", "127.0.0.1")
         .config("spark.driver.bindAddress", "127.0.0.1")
+        .config("spark.hadoop.fs.s3a.endpoint", CONFIG["minio_endpoint"])
+        .config("spark.hadoop.fs.s3a.access.key", CONFIG["minio_access_key"])
+        .config("spark.hadoop.fs.s3a.secret.key", CONFIG["minio_secret_key"])
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config("spark.driver.memory", "2g")
         .getOrCreate()
     )
 
@@ -122,47 +132,27 @@ def main():
     clean_df.printSchema()
 
 
-    # --- Query 1: Raw events to ES (original behavior) ---
+    # --- Raw events to ES  ---
     raw_query = (
         clean_df.writeStream
-        .format("console")
         .outputMode("append")
         .foreachBatch(write_to_elasticsearch)
         .option("checkpointLocation", f"{config['checkpoint_location']}/raw")
         .option("truncate", False)
         .start()
-    )``
-
-    # --- Query 2: Windowed aggregations ---
-    windowed_df = (
-        clean_df
-        .withWatermark("event_time", config["watermark_delay"])
-        .groupBy(
-            window(col("event_time"), config["window_duration"]),
-            col("event_type"),
-        )
-        .agg(
-            spark_round(sum("price"), 2).alias("total_revenue"),
-            count("*").alias("event_count"),
-            approx_count_distinct("user_id").alias("unique_users"),
-        )
-        .select(
-            col("window.start").alias("window_start"),
-            col("window.end").alias("window_end"),
-            "event_type",
-            "total_revenue",
-            "event_count",
-            "unique_users",
-        )
     )
 
-    windowed_query = (
-        windowed_df.writeStream
-        .outputMode("update")
-        .foreachBatch(write_windowed_to_elasticsearch)
-        .option("checkpointLocation", f"{config['checkpoint_location']}/windowed")
+    write_df = clean_df.withColumn("event_date", to_date(col("event_time")))
+    lake_write = (
+        write_df.writeStream
+        .format("parquet")
+        .outputMode("append")
+        .option("path", f"s3a://{config['minio_bucket']}/streaming/")
+        .option("checkpointLocation", f"{config['checkpoint_location']}/lake")
+        .partitionBy("event_date")
         .start()
     )
+
 
     logger.info("Streaming queries started. Waiting for data...")
     spark.streams.awaitAnyTermination()
