@@ -38,12 +38,13 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
                         ┌─ Airflow (orchestration) ──────────────────────┐
                         │                                                │
 CSV → Spark (bulk) → MinIO (Parquet) ──┬── Spark Batch (analytics) → ES → Kibana
-                                        ├── Feature Engineering → MinIO (for Recommendation)
+                                        ├── Feature Engineering → MinIO + ES (Recommendation)
+                                        ├── Customer Segmentation → ES (KMeans)
                                         └── Stream Replay → Kafka
                                                             ├── Spark Streaming (aggregations) → ES
                                                             └── Anomaly Detection → ES
 
-MinIO (features) → Recommendation training (ALS)
+MinIO (features) → Recommendation training
 ```
 
 ---
@@ -53,9 +54,9 @@ MinIO (features) → Recommendation training (ALS)
 ```
 Project_BigData/
 ├── ingest_to_lake.py           # Bulk ingest CSV → MinIO Parquet
-├── feature_engineering.py      # Feature tables cho Recommendation (ALS) → MinIO + ES
+├── feature_engineering.py      # Feature tables cho Recommendation → MinIO + ES
 ├── spark_batch.py              # 6 báo cáo batch analytics → ES
-├── customer_segmentation.py    # KMeans segmentation (bên khác thực hiện) → ES
+├── customer_segmentation.py    # KMeans segmentation → ES
 ├── schemas.py                  # Shared ECOMMERCE_SCHEMA
 ├── compare_performance.py      # So sánh Pandas vs Spark (utility)
 ├── view_data.py                # Xem sample data từ CSV (utility)
@@ -99,9 +100,9 @@ Project_BigData/
 | Service | File | Chức năng |
 |---------|------|-----------|
 | `ingest-to-lake` | `ingest_to_lake.py` | Đọc CSV, validate, ghi Parquet vào MinIO |
-| `feature-engineering` | `feature_engineering.py` | Tính feature tables cho Recommendation (ALS) |
+| `feature-engineering` | `feature_engineering.py` | Feature tables cho Recommendation → MinIO + ES |
 | `spark-batch` | `spark_batch.py` | 6 báo cáo analytics → ES |
-| `customer-segmentation` | `customer_segmentation.py` | KMeans segmentation (bên khác thực hiện) → ES |
+| `customer-segmentation` | `customer_segmentation.py` | KMeans segmentation → ES |
 
 ### 3. Speed Layer (Streaming)
 
@@ -259,7 +260,7 @@ docker compose up spark-batch
 | `batch-top-products` | Top 20 sản phẩm theo revenue |
 | `batch-hourly-activity` | Hoạt động theo giờ trong ngày |
 
-### Bước 6: Chạy Customer Segmentation (ML — bên khác thực hiện)
+### Bước 6: Chạy Customer Segmentation (ML)
 
 ```bash
 docker compose up customer-segmentation
