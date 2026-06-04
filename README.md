@@ -37,14 +37,14 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
 ```
                         ┌─ Airflow (orchestration) ──────────────────────┐
                         │                                                │
-CSV → Spark (bulk) → MinIO (Parquet) ──┬── Spark Batch (analytics) → ES → Kibana
-                                        ├── Feature Engineering → MinIO + ES (Recommendation)
+CSV → Spark (bulk) → MinIO (Parquet) ──┬── Spark Batch (analytics + price baseline) → ES → Kibana
+                                        ├── Feature Engineering → MinIO + ES (Recommendation + XGBoost)
                                         ├── Customer Segmentation → ES (KMeans)
-                                        └── Stream Replay → Kafka
-                                                            ├── Spark Streaming (aggregations) → ES
-                                                            └── Anomaly Detection → ES
+                                        └── Stream Replay → Kafka (+ fake anomalies)
+                                                            ├── Spark Streaming (aggregations) → ES + MinIO
+                                                            └── Anomaly Detection ← price baseline from ES → ES
 
-MinIO (features) → Recommendation training
+MinIO (features) → Recommendation / XGBoost training
 ```
 
 ---
@@ -100,17 +100,17 @@ Project_BigData/
 | Service | File | Chức năng |
 |---------|------|-----------|
 | `ingest-to-lake` | `ingest_to_lake.py` | Đọc CSV, validate, ghi Parquet vào MinIO |
-| `feature-engineering` | `feature_engineering.py` | Feature tables cho Recommendation → MinIO + ES |
-| `spark-batch` | `spark_batch.py` | 6 báo cáo analytics → ES |
+| `feature-engineering` | `feature_engineering.py` | Feature tables cho Recommendation + XGBoost → MinIO + ES |
+| `spark-batch` | `spark_batch.py` | 8 báo cáo analytics + price baseline → ES |
 | `customer-segmentation` | `customer_segmentation.py` | KMeans segmentation → ES |
 
 ### 3. Speed Layer (Streaming)
 
 | Service | File | Chức năng |
 |---------|------|-----------|
-| `stream-replay` | `streaming/stream_replay.py` | Replay Parquet → Kafka (PyArrow + kafka-python) |
-| `spark-streaming` | `streaming/spark_streaming.py` | Streaming aggregations (5-min window) |
-| `spark-anomaly` | `streaming/streaming_anomaly.py` | Phát hiện bất thường (price, volume, session) |
+| `stream-replay` | `streaming/stream_replay.py` | Replay Parquet → Kafka + inject fake anomalies |
+| `spark-streaming` | `streaming/spark_streaming.py` | Streaming aggregations → ES + MinIO |
+| `spark-anomaly` | `streaming/streaming_anomaly.py` | Phát hiện bất thường (price ← ES baseline, hierarchical volume, session) |
 
 > **Lưu ý quan trọng**: Không thể chạy `spark-streaming` và `spark-anomaly` cùng lúc do giới hạn memory (OOM). Phải stop cái này trước khi start cái kia.
 
@@ -147,14 +147,15 @@ CSV → Spark Ingest → MinIO (Parquet partitioned by event_date)
 
 ### Streaming Pipeline
 ```
-MinIO → Stream Replay (PyArrow) → Kafka (ecommerce-events)
-                                  ↓
-                        ┌─────────┴─────────┐
-                        ↓                   ↓ (chỉ chọn 1, không chạy cùng lúc)
-               Spark Streaming       Anomaly Detection
-                        ↓                   ↓
-               ES: ecommerce-events   ES: streaming-anomalies
-               ES: streaming-windowed-revenue
+MinIO → Stream Replay (PyArrow + fake anomalies) → Kafka (ecommerce-events)
+                                                    ↓
+                                          ┌─────────┴─────────┐
+                                          ↓                   ↓ (chỉ chọn 1, không chạy cùng lúc)
+                                 Spark Streaming       Anomaly Detection ← batch-price-baseline (ES)
+                                          ↓                   ↓
+                                 ES: ecommerce-events   ES: streaming-anomalies
+                                 MinIO: streaming/      (price anomaly + hierarchical volume spike + suspicious session)
+                                 ES: streaming-windowed-revenue
 ```
 
 ---
@@ -207,10 +208,11 @@ docker compose up feature-engineering
 ```
 
 - Đọc Parquet từ MinIO
-- Tính toán 3 bảng features cho Recommendation System (ALS):
+- Tính toán 4 bảng features:
   - **User features**: RFM (Recency, Frequency, Monetary) + engagement (view/cart/purchase count, active_days) + favorite category & brand → MinIO
   - **Product features**: popularity (view/cart/purchase count) + revenue + conversion_rate + unique_buyers → MinIO
   - **Interactions**: user-product implicit feedback matrix (view=1, cart=2, purchase=3) cho ALS → MinIO
+  - **Session features**: session_duration, total_views, total_carts, label (purchase=1), cart_to_view_ratio, hour_of_day — cho XGBoost Purchase Prediction → MinIO
 - Ghi báo cáo chất lượng data vào ES index `data-quality-report`
 
 ### Bước 4: Khởi động Streaming
@@ -226,9 +228,10 @@ docker compose up -d spark-streaming
 docker compose up stream-replay   # gửi events, streaming sẽ consume
 
 # Option B: Anomaly Detection (price/volume/session anomalies)
+# QUAN TRỌNG: Phải chạy spark-batch TRƯỚC để tạo batch-price-baseline
 docker compose stop spark-streaming
 docker compose up -d spark-anomaly
-docker compose up stream-replay   # gửi events, anomaly sẽ process
+docker compose up stream-replay   # gửi events + fake anomalies, anomaly sẽ process
 ```
 
 **Lưu ý quan trọng**:
@@ -249,14 +252,16 @@ curl.exe "http://localhost:9200/ecommerce-events/_count"
 docker compose up spark-batch
 ```
 
-**6 báo cáo được tạo**:
+**8 báo cáo được tạo**:
 
 | ES Index | Nội dung |
 |----------|----------|
-| `batch-revenue-category` | Doanh thu theo category_code |
+| `batch-revenue-category` | Doanh thu theo category (3 cấp: level_1, level_2, level_3) |
 | `batch-revenue-brand` | Doanh thu theo brand |
 | `batch-daily-revenue` | Xu hướng doanh thu theo ngày |
-| `batch-conversion-funnel` | Phân bố view/cart/purchase |
+| `batch-weekly-revenue` | Xu hướng doanh thu theo tuần |
+| `batch-conversion-funnel` | Phân bố view/cart/purchase + conversion rates |
+| `batch-price-baseline` | Giá trung bình + độ lệch chuẩn theo category (dùng cho anomaly detection) |
 | `batch-top-products` | Top 20 sản phẩm theo revenue |
 | `batch-hourly-activity` | Hoạt động theo giờ trong ngày |
 
@@ -373,10 +378,14 @@ ecommerce-datalake/
 │   └── event_date=2019-10-01/
 │   └── event_date=2019-10-02/
 │   └── ...
+├── streaming/                   # Streaming data ghi lại MinIO
+│   └── event_date=2019-10-25/
+│   └── ...
 ├── features/
-│   ├── user_features/
-│   ├── product_features/
-│   └── interactions/
+│   ├── user_features/           # RFM + engagement (ALS)
+│   ├── product_features/        # Popularity + revenue (ALS)
+│   ├── interactions/            # User-Product implicit feedback (ALS)
+│   └── session_features/        # Session features (XGBoost Purchase Prediction)
 ```
 
 ### 4. Airflow UI - Pipeline Orchestration
@@ -563,11 +572,13 @@ curl.exe -X DELETE "http://localhost:9200/*"
 |-------|--------|----------|
 | `ecommerce-events` | Streaming | Raw events từ Kafka |
 | `streaming-windowed-revenue` | Streaming | Windowed aggregations (5-min) |
-| `streaming-anomalies` | Anomaly | Price/volume/session anomalies |
-| `batch-revenue-category` | Batch | Doanh thu theo category |
+| `streaming-anomalies` | Anomaly | Price/volume/session anomalies (hierarchical volume spike) |
+| `batch-revenue-category` | Batch | Doanh thu theo category (3 cấp) |
 | `batch-revenue-brand` | Batch | Doanh thu theo brand |
 | `batch-daily-revenue` | Batch | Xu hướng doanh thu theo ngày |
-| `batch-conversion-funnel` | Batch | View/cart/purchase counts |
+| `batch-weekly-revenue` | Batch | Xu hướng doanh thu theo tuần |
+| `batch-conversion-funnel` | Batch | View/cart/purchase counts + conversion rates |
+| `batch-price-baseline` | Batch | Giá trung bình + stddev theo category (cho anomaly) |
 | `batch-top-products` | Batch | Top 20 sản phẩm theo revenue |
 | `batch-hourly-activity` | Batch | Hoạt động theo giờ |
 | `ml-customer-segments` | ML | Per-user segment assignment |
