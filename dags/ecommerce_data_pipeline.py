@@ -1,9 +1,10 @@
-"""Main data pipeline: ingest → validate → feature engineering → quality check."""
+"""Main data pipeline: ingest → feature engineering → quality check."""
 
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.operators.python import PythonOperator
+from docker.types import Mount
 
 
 def check_quality(**context):
@@ -22,6 +23,11 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
+COMMON_MOUNTS = [
+    Mount(source="/d/Project_BigData", target="/app", type="bind"),
+    Mount(source="/d/Project_BigData/.ivy-cache", target="/tmp/.ivy2", type="bind"),
+]
+
 with DAG(
     dag_id="ecommerce_data_pipeline",
     default_args=default_args,
@@ -32,20 +38,59 @@ with DAG(
     tags=["ecommerce", "pipeline"],
 ) as dag:
 
-    ingest_to_lake = BashOperator(
+    ingest_to_lake = DockerOperator(
         task_id="ingest_to_lake",
-        bash_command=(
-            "docker compose run --rm ingest-to-lake "
-            "2>&1 | tee /tmp/airflow_ingest.log"
-        ),
+        image="apache/spark:3.5.1",
+        working_dir="/app",
+        environment={
+            "HOME": "/tmp",
+            "DATA_FILE": "data/2019-Oct.csv",
+            "MINIO_ENDPOINT": "http://minio:9000",
+            "MINIO_ACCESS_KEY": "minioadmin",
+            "MINIO_SECRET_KEY": "minioadmin",
+            "MINIO_BUCKET": "ecommerce-datalake",
+            "SPARK_PACKAGES": "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262",
+        },
+        command=[
+            "/opt/spark/bin/spark-submit",
+            "--master", "local[*]",
+            "--conf", "spark.jars.ivy=/tmp/.ivy2",
+            "--conf", "spark.driver.memory=2g",
+            "--packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262",
+            "/app/ingest_to_lake.py",
+        ],
+        mounts=COMMON_MOUNTS,
+        docker_url="unix://var/run/docker.sock",
+        network_mode="project_bigdata_default",
+        auto_remove=True,
     )
 
-    feature_engineering = BashOperator(
+    feature_engineering = DockerOperator(
         task_id="feature_engineering",
-        bash_command=(
-            "docker compose run --rm feature-engineering "
-            "2>&1 | tee /tmp/airflow_features.log"
-        ),
+        image="apache/spark:3.5.1",
+        working_dir="/app",
+        environment={
+            "HOME": "/tmp",
+            "MINIO_ENDPOINT": "http://minio:9000",
+            "MINIO_ACCESS_KEY": "minioadmin",
+            "MINIO_SECRET_KEY": "minioadmin",
+            "MINIO_BUCKET": "ecommerce-datalake",
+            "ES_NODES": "elasticsearch",
+            "ES_PORT": "9200",
+            "SPARK_PACKAGES": "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3",
+        },
+        command=[
+            "/opt/spark/bin/spark-submit",
+            "--master", "local[*]",
+            "--conf", "spark.jars.ivy=/tmp/.ivy2",
+            "--conf", "spark.driver.memory=2g",
+            "--packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3",
+            "/app/feature_engineering.py",
+        ],
+        mounts=COMMON_MOUNTS,
+        docker_url="unix://var/run/docker.sock",
+        network_mode="project_bigdata_default",
+        auto_remove=True,
     )
 
     quality_check = PythonOperator(

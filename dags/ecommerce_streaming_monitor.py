@@ -6,22 +6,21 @@ from airflow.operators.python import PythonOperator
 
 
 def check_kafka_status(**context):
-    """Check if Kafka is accessible and topic has data."""
-    import subprocess
+    """Check if Kafka is accessible via Docker API."""
+    import docker
     import logging
     logger = logging.getLogger(__name__)
 
     try:
-        result = subprocess.run(
-            ["docker", "compose", "exec", "-T", "kafka",
-             "kafka-topics", "--describe", "--topic", "ecommerce-events",
-             "--bootstrap-server", "localhost:29092"],
-            capture_output=True, text=True, timeout=30
+        client = docker.DockerClient(base_url="unix://var/run/docker.sock")
+        kafka = client.containers.get("project_bigdata-kafka-1")
+        exit_code, output = kafka.exec_run(
+            "kafka-topics --describe --topic ecommerce-events --bootstrap-server localhost:29092"
         )
-        if result.returncode == 0:
+        if exit_code == 0:
             logger.info("Kafka topic check passed.")
         else:
-            logger.warning(f"Kafka topic check failed: {result.stderr}")
+            logger.warning(f"Kafka topic check failed: {output.decode()}")
     except Exception as e:
         logger.warning(f"Kafka check error: {e}")
 
@@ -33,7 +32,7 @@ def check_es_status(**context):
     logger = logging.getLogger(__name__)
 
     try:
-        req = urllib.request.Request("http://localhost:9200/_cat/indices?format=json")
+        req = urllib.request.Request("http://elasticsearch:9200/_cat/indices?format=json")
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = resp.read().decode()
             logger.info(f"ES indices: {len(data)} bytes returned")

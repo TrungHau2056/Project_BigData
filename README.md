@@ -62,7 +62,7 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                  SERVING LAYER (Kibana)                         │   │
 │  │                                                                 │   │
-│  │  Elasticsearch (12 indices) ◄── Spark / Streaming               │   │
+│  │  Elasticsearch (11 indices) ◄── Spark / Streaming               │   │
 │  │       │                                                         │   │
 │  │       └──► Kibana Dashboard                                     │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
@@ -84,9 +84,10 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
 
 | Service | Port | Mô tả |
 |---------|------|-------|
-| `zookeeper` | 2181 | Kafka coordination |
-| `kafka` | 9092 (external), 29092 (internal) | Message broker, topic `ecommerce-events` |
+| `kafka` | 9092 (external), 29092 (internal) | Message broker (KRaft mode, không cần Zookeeper) |
+| `kafka-init` | — | Tạo topic `ecommerce-events` (chạy 1 lần) |
 | `minio` | 9000 (API), 9001 (console) | S3-compatible object storage |
+| `minio-init` | — | Tạo bucket `ecommerce-datalake` (chạy 1 lần) |
 | `elasticsearch` | 9200 | Search & analytics engine |
 | `kibana` | 5601 | Visualization UI |
 
@@ -106,6 +107,8 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
 | `stream-replay` | `stream_replay.py` | Replay Parquet → Kafka (1000 events/sec) |
 | `spark-streaming` | `spark_streaming.py` | Streaming aggregations (5-min window) |
 | `spark-anomaly` | `streaming_anomaly.py` | Phát hiện bất thường (price, volume, session) |
+
+> **⚠️ Lưu ý**: Không thể chạy `spark-streaming` và `spark-anomaly` cùng lúc do giới hạn memory (OOM). Phải stop cái này trước khi start cái kia.
 
 ### 4. Orchestration
 
@@ -135,7 +138,7 @@ CSV → Spark Ingest → MinIO (Parquet partitioned by event_date)
 MinIO → Stream Replay → Kafka (ecommerce-events)
                         ↓
               ┌─────────┴─────────┐
-              ↓                   ↓
+              ↓                   ↓ (chọn 1, không chạy cùng lúc)
      Spark Streaming       Anomaly Detection
               ↓                   ↓
      ES: ecommerce-events   ES: streaming-anomalies
@@ -151,16 +154,16 @@ MinIO → Stream Replay → Kafka (ecommerce-events)
 # Dừng và cleanup (nếu có)
 docker compose down --remove-orphans
 
-# Start Zookeeper + Kafka
+# Start Kafka (KRaft mode, không cần Zookeeper)
 docker compose up -d kafka
 
-# Explicitly create topic named "ecommerce-events"
+# Tạo topic ecommerce-events
 docker compose up kafka-init
 
 # Start MinIO (tự động tạo bucket ecommerce-datalake)
 docker compose up -d minio
 
-
+# Đợi minio-init tạo bucket xong
 ```
 
 **Kiểm tra**:
@@ -209,16 +212,22 @@ docker compose up feature-engineering
 # Start Elasticsearch + Kibana
 docker compose up -d elasticsearch kibana
 
-# Start stream-replay (gửi data vào Kafka)
-docker compose up -d stream-replay
+# QUAN TRỌNG: Chỉ chạy MỘT Spark streaming container tại một thời điểm (giới hạn memory)
 
-# Start Spark Streaming consumers
-docker compose up -d spark-streaming spark-anomaly
+# Option A: Spark Streaming (raw events + windowed aggregations)
+docker compose up -d spark-streaming
+docker compose up stream-replay   # gửi events, streaming sẽ consume
+
+# Option B: Anomaly Detection (price/volume/session anomalies)
+docker compose stop spark-streaming
+docker compose up -d spark-anomaly
+docker compose up stream-replay   # gửi events, anomaly sẽ process
 ```
 
-**⚠️ Lưu ý quan trọng**: 
+**⚠️ Lưu ý quan trọng**:
 - `spark-streaming` dùng `startingOffsets: latest` — chỉ consume data **sau khi** Spark start
-- Start `spark-streaming` **trước hoặc cùng lúc** với `stream-replay` để không mất data
+- Phải start `spark-streaming`/`spark-anomaly` **TRƯỚC** `stream-replay` để không mất data
+- **Không chạy 2 Spark streaming container cùng lúc** — sẽ gây OOM (exit code 137). Chạy spark-streaming HOẶC spark-anomaly, không phải cả hai
 
 **Kiểm tra streaming**:
 ```bash
@@ -397,8 +406,9 @@ ecommerce-datalake/
 
 **Giải pháp**:
 ```bash
-# Start streaming services
-docker compose up -d spark-streaming spark-anomaly stream-replay
+# Start streaming services (chỉ MỘT Spark streaming container tại một thời điểm)
+docker compose up -d spark-streaming
+docker compose up stream-replay
 
 # Chờ 2-3 phút cho data flow
 curl.exe "http://localhost:9200/_cat/indices?v"
