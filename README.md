@@ -44,7 +44,7 @@ CSV → Spark (bulk) → MinIO (Parquet) ──┬── Spark Batch (analytics 
                                         ├── Customer Segmentation → ES (KMeans)
                                         └── Stream Replay → Kafka (+ fake anomalies)
                                                             ├── Spark Streaming (aggregations) → ES + MinIO
-                                                            └── Anomaly Detection ← price baseline from ES → ES
+                                                            └── Anomaly Detection ← price baseline from ES → ES + MinIO
 
 MinIO (features/session_features) → MLflow (train XGBoost) → MinIO (models/)
                                                             → FastAPI (serve) → Streamlit (UI)
@@ -171,8 +171,8 @@ MinIO → Stream Replay (PyArrow + fake anomalies) → Kafka (ecommerce-events)
                                  Spark Streaming       Anomaly Detection ← batch-price-baseline (ES)
                                           ↓                   ↓
                                  ES: ecommerce-events   ES: streaming-anomalies
-                                 MinIO: streaming/      (price anomaly + hierarchical volume spike + suspicious session)
-                                 ES: streaming-windowed-revenue
+                                 MinIO: streaming/      MinIO: anomalies/
+                                                        (price anomaly + hierarchical volume spike + suspicious session)
 ```
 
 ### ML Pipeline
@@ -465,6 +465,9 @@ ecommerce-datalake/
 ├── streaming/                   # Streaming data ghi lại MinIO
 │   └── event_date=2019-10-25/
 │   └── ...
+├── anomalies/                   # Anomaly detection results (Parquet)
+│   └── event_date=2019-10-25/
+│   └── ...
 ├── features/
 │   ├── user_features/           # RFM + engagement (ALS)
 │   ├── product_features/        # Popularity + revenue (ALS)
@@ -524,6 +527,8 @@ ecommerce-datalake/
 | Spark Anomaly | `TOPIC_NAME` | `ecommerce-events` |
 | Spark Anomaly | `ES_NODES` | `elasticsearch` |
 | Spark Anomaly | `ES_PORT` | `9200` |
+| Spark Anomaly | `MINIO_ENDPOINT` | `http://minio:9000` |
+| Spark Anomaly | `MINIO_BUCKET` | `ecommerce-datalake` |
 | Spark Anomaly | `PRICE_ZSCORE_THRESHOLD` | `2.0` |
 | Spark Anomaly | `SESSION_EVENT_LIMIT` | `100` |
 | Spark Batch | `MINIO_ENDPOINT` | `http://minio:9000` |
@@ -669,7 +674,6 @@ curl.exe -X DELETE "http://localhost:9200/*"
 | Index | Source | Nội dung |
 |-------|--------|----------|
 | `ecommerce-events` | Streaming | Raw events từ Kafka |
-| `streaming-windowed-revenue` | Streaming | Windowed aggregations (5-min) |
 | `streaming-anomalies` | Anomaly | Price/volume/session anomalies (hierarchical volume spike) |
 | `batch-revenue-category` | Batch | Doanh thu theo category (3 cấp) |
 | `batch-revenue-brand` | Batch | Doanh thu theo brand |
