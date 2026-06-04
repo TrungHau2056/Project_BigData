@@ -6,10 +6,12 @@ Nền tảng phân tích dữ liệu thương mại điện tử thời gian th�
 
 - [Tổng quan](#tổng-quan)
 - [Kiến trúc hệ thống](#kiến-trúc-hệ-thống)
+- [Cấu trúc project](#cấu-trúc-project)
 - [Các thành phần](#các-thành-phần)
 - [Luồng dữ liệu](#luồng-dữ-liệu)
 - [Cài đặt và chạy](#cài-đặt-và-chạy)
 - [Xem và phân tích dữ liệu](#xem-và-phân-tích-dữ-liệu)
+- [Cấu hình runtime](#cấu-hình-runtime)
 - [Troubleshooting](#troubleshooting)
 - [Scale với dữ liệu lớn](#scale-với-dữ-liệu-lớn)
 
@@ -33,47 +35,48 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
 ## Kiến trúc hệ thống
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         LAMBDA ARCHITECTURE                             │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    BATCH LAYER (Spark)                          │   │
-│  │                                                                 │   │
-│  │  CSV (15GB) ──► Spark Ingest ──► MinIO (Parquet)               │   │
-│  │                              │                                  │   │
-│  │                              ├──► Feature Engineering ──► ML    │   │
-│  │                              │                                  │   │
-│  │                              └──► Spark Batch Analytics         │   │
-│  │                                   6 báo cáo                    │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                    │                                    │
-│                                    ▼                                    │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                   SPEED LAYER (Streaming)                       │   │
-│  │                                                                 │   │
-│  │  MinIO ──► Stream Replay ──► Kafka ──┬──► Spark Streaming      │   │
-│  │                                        │    (windowed agg)      │   │
-│  │                                        └──► Anomaly Detection  │   │
-│  │                                             (z-score, spike)   │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                    │                                    │
-│                                    ▼                                    │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                  SERVING LAYER (Kibana)                         │   │
-│  │                                                                 │   │
-│  │  Elasticsearch (11 indices) ◄── Spark / Streaming               │   │
-│  │       │                                                         │   │
-│  │       └──► Kibana Dashboard                                     │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                    │                                    │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │              ORCHESTRATION (Airflow)                            │   │
-│  │                                                                 │   │
-│  │  3 DAGs: Data Pipeline, Daily Analytics, Streaming Monitor      │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+                        ┌─ Airflow (orchestration) ──────────────────────┐
+                        │                                                │
+CSV → Spark (bulk) → MinIO (Parquet) ──┬── Spark Batch (analytics) → ES → Kibana
+                                        ├── Feature Engineering → MinIO (for ML)
+                                        └── Stream Replay → Kafka
+                                                            ├── Spark Streaming (aggregations) → ES
+                                                            └── Anomaly Detection → ES
+
+MinIO (features) → ML training (by other team member)
+```
+
+---
+
+## Cấu trúc project
+
+```
+Project_BigData/
+├── ingest_to_lake.py           # Bulk ingest CSV → MinIO Parquet
+├── feature_engineering.py      # RFM + engagement features → MinIO + ES
+├── spark_batch.py              # 6 báo cáo batch analytics → ES
+├── customer_segmentation.py    # KMeans clustering → ES
+├── schemas.py                  # Shared ECOMMERCE_SCHEMA
+├── compare_performance.py      # So sánh Pandas vs Spark (utility)
+├── view_data.py                # Xem sample data từ CSV (utility)
+├── requirements.txt            # Python dependencies (pyspark, kafka-python, etc.)
+│
+├── streaming/
+│   ├── stream_replay.py        # Replay MinIO → Kafka (PyArrow + kafka-python)
+│   ├── spark_streaming.py      # Streaming aggregations (5-min window)
+│   └── streaming_anomaly.py    # Anomaly detection (price/volume/session)
+│
+├── dags/
+│   ├── ecommerce_data_pipeline.py      # ingest → feature_eng → quality_check
+│   ├── ecommerce_daily_analytics.py    # batch → segmentation
+│   └── ecommerce_streaming_monitor.py  # Kafka + ES health check
+│
+├── data/                       # Source CSV files (2019-Oct.csv, etc.)
+├── Dockerfile                  # Base Spark image
+├── Dockerfile.airflow          # Custom Airflow image with Docker provider
+├── docker-compose.yml          # Toàn bộ services
+├── CLAUDE.md                   # Chi tiết kiến trúc cho Claude Code
+└── README.md                   # File này
 ```
 
 ---
@@ -84,7 +87,7 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
 
 | Service | Port | Mô tả |
 |---------|------|-------|
-| `kafka` | 9092 (external), 29092 (internal) | Message broker (KRaft mode, không cần Zookeeper) |
+| `kafka` | 9092 (external), 29092 (internal) | Message broker — KRaft mode, không cần Zookeeper |
 | `kafka-init` | — | Tạo topic `ecommerce-events` (chạy 1 lần) |
 | `minio` | 9000 (API), 9001 (console) | S3-compatible object storage |
 | `minio-init` | — | Tạo bucket `ecommerce-datalake` (chạy 1 lần) |
@@ -97,18 +100,18 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
 |---------|------|-----------|
 | `ingest-to-lake` | `ingest_to_lake.py` | Đọc CSV, validate, ghi Parquet vào MinIO |
 | `feature-engineering` | `feature_engineering.py` | Tính RFM, engagement features cho ML |
-| `spark-batch` | `spark_batch.py` | 6 báo cáo analytics |
-| `customer-segmentation` | `customer_segmentation.py` | KMeans clustering (4 nhóm) |
+| `spark-batch` | `spark_batch.py` | 6 báo cáo analytics → ES |
+| `customer-segmentation` | `customer_segmentation.py` | KMeans clustering (4 nhóm) → ES |
 
 ### 3. Speed Layer (Streaming)
 
 | Service | File | Chức năng |
 |---------|------|-----------|
-| `stream-replay` | `stream_replay.py` | Replay Parquet → Kafka (1000 events/sec) |
-| `spark-streaming` | `spark_streaming.py` | Streaming aggregations (5-min window) |
-| `spark-anomaly` | `streaming_anomaly.py` | Phát hiện bất thường (price, volume, session) |
+| `stream-replay` | `streaming/stream_replay.py` | Replay Parquet → Kafka (PyArrow + kafka-python) |
+| `spark-streaming` | `streaming/spark_streaming.py` | Streaming aggregations (5-min window) |
+| `spark-anomaly` | `streaming/streaming_anomaly.py` | Phát hiện bất thường (price, volume, session) |
 
-> **⚠️ Lưu ý**: Không thể chạy `spark-streaming` và `spark-anomaly` cùng lúc do giới hạn memory (OOM). Phải stop cái này trước khi start cái kia.
+> **Lưu ý quan trọng**: Không thể chạy `spark-streaming` và `spark-anomaly` cùng lúc do giới hạn memory (OOM). Phải stop cái này trước khi start cái kia.
 
 ### 4. Orchestration
 
@@ -117,6 +120,14 @@ Platform xử lý dữ liệu e-commerce từ dataset Kaggle với 3 lớp xử 
 | `airflow-webserver` | `ecommerce_data_pipeline` | Manual trigger |
 | `airflow-scheduler` | `ecommerce_daily_analytics` | @daily |
 | | `ecommerce_streaming_monitor` | Every 5 min |
+
+### 5. Utilities
+
+| File | Chức năng |
+|------|-----------|
+| `view_data.py` | Xem 5 dòng đầu + schema của file CSV nguồn |
+| `compare_performance.py` | So sánh tốc độ xử lý Pandas vs Spark |
+| `schemas.py` | Shared `ECOMMERCE_SCHEMA` dùng bởi tất cả Spark scripts |
 
 ---
 
@@ -135,13 +146,14 @@ CSV → Spark Ingest → MinIO (Parquet partitioned by event_date)
 
 ### Streaming Pipeline
 ```
-MinIO → Stream Replay → Kafka (ecommerce-events)
-                        ↓
-              ┌─────────┴─────────┐
-              ↓                   ↓ (chọn 1, không chạy cùng lúc)
-     Spark Streaming       Anomaly Detection
-              ↓                   ↓
-     ES: ecommerce-events   ES: streaming-anomalies
+MinIO → Stream Replay (PyArrow) → Kafka (ecommerce-events)
+                                  ↓
+                        ┌─────────┴─────────┐
+                        ↓                   ↓ (chỉ chọn 1, không chạy cùng lúc)
+               Spark Streaming       Anomaly Detection
+                        ↓                   ↓
+               ES: ecommerce-events   ES: streaming-anomalies
+               ES: streaming-windowed-revenue
 ```
 
 ---
@@ -178,12 +190,9 @@ docker compose ps
 docker compose up ingest-to-lake
 ```
 
-**Giải thích**:
 - Spark đọc file `data/2019-Oct.csv` (5.67 GB)
 - Validate: null checks, giá âm, phân bố event type
 - Ghi Parquet vào MinIO: `s3a://ecommerce-datalake/raw/` partition theo `event_date`
-
-**Thời gian**: 5-10 phút
 
 **Kiểm tra logs**:
 ```bash
@@ -196,15 +205,12 @@ docker compose logs ingest-to-lake
 docker compose up feature-engineering
 ```
 
-**Giải thích**:
 - Đọc Parquet từ MinIO
 - Tính toán 3 bảng features:
-  - **User features**: RFM (Recency, Frequency, Monetary) + engagement score
-  - **Product features**: popularity + revenue
-  - **Interactions**: user-product matrix cho ALS
+  - **User features**: RFM (Recency, Frequency, Monetary) + engagement score → MinIO
+  - **Product features**: popularity + revenue → MinIO
+  - **Interactions**: user-product matrix cho ALS → MinIO
 - Ghi báo cáo chất lượng data vào ES index `data-quality-report`
-
-**Thời gian**: 5-10 phút
 
 ### Bước 4: Khởi động Streaming
 
@@ -224,44 +230,19 @@ docker compose up -d spark-anomaly
 docker compose up stream-replay   # gửi events, anomaly sẽ process
 ```
 
-**⚠️ Lưu ý quan trọng**:
+**Lưu ý quan trọng**:
 - `spark-streaming` dùng `startingOffsets: latest` — chỉ consume data **sau khi** Spark start
 - Phải start `spark-streaming`/`spark-anomaly` **TRƯỚC** `stream-replay` để không mất data
-- **Không chạy 2 Spark streaming container cùng lúc** — sẽ gây OOM (exit code 137). Chạy spark-streaming HOẶC spark-anomaly, không phải cả hai
+- **Không chạy 2 Spark streaming container cùng lúc** — sẽ gây OOM (exit code 137)
 
 **Kiểm tra streaming**:
 ```bash
-# Xem logs stream-replay
 docker compose logs -f stream-replay
-
-# Xem logs spark-streaming
 docker compose logs -f spark-streaming
-
-# Kiểm tra Elasticsearch
 curl.exe "http://localhost:9200/ecommerce-events/_count"
 ```
 
-### Bước 5: Airflow Orchestration (tùy chọn)
-
-```bash
-# Initialize Airflow database + user
-docker compose up -d airflow-init
-
-# Chờ 60 giây cho init hoàn tất
-
-# Start webserver + scheduler
-docker compose up -d airflow-webserver airflow-scheduler
-```
-
-**Truy cập Airflow UI**: http://localhost:8080
-- Username: `airflow`
-- Password: `airflow`
-
----
-
-## Chạy Batch Analytics
-
-Sau khi đã ingest data (Bước 2), chạy bất kỳ lúc nào:
+### Bước 5: Chạy Batch Analytics
 
 ```bash
 docker compose up spark-batch
@@ -278,18 +259,32 @@ docker compose up spark-batch
 | `batch-top-products` | Top 20 sản phẩm theo revenue |
 | `batch-hourly-activity` | Hoạt động theo giờ trong ngày |
 
----
-
-## Chạy Customer Segmentation (ML)
+### Bước 6: Chạy Customer Segmentation (ML)
 
 ```bash
 docker compose up customer-segmentation
 ```
 
-**Output**:
 - KMeans clustering với `k=4` (có thể config qua `NUM_CLUSTERS`)
 - Business labels: **Champions, Loyal, Potential, At-Risk, Lost**
 - ES indices: `ml-customer-segments`, `ml-segment-summary`
+
+### Bước 7: Airflow Orchestration (tùy chọn)
+
+```bash
+# Build custom Airflow image (chỉ lần đầu)
+docker compose build airflow-init
+
+# Initialize Airflow database + user
+docker compose up -d airflow-init
+
+# Chờ init hoàn tất
+
+# Start webserver + scheduler
+docker compose up -d airflow-webserver airflow-scheduler
+```
+
+**Truy cập Airflow UI**: http://localhost:8080 (airflow/airflow)
 
 ---
 
@@ -306,6 +301,7 @@ curl.exe "http://localhost:9200/ecommerce-events/_count"
 curl.exe "http://localhost:9200/batch-revenue-category/_count"
 curl.exe "http://localhost:9200/ml-customer-segments/_count"
 curl.exe "http://localhost:9200/streaming-anomalies/_count"
+curl.exe "http://localhost:9200/data-quality-report/_count"
 
 # Xem sample data
 curl.exe "http://localhost:9200/batch-conversion-funnel/_search?pretty"
@@ -367,9 +363,7 @@ curl.exe "http://localhost:9200/batch-conversion-funnel/_search?pretty"
 
 ### 3. MinIO Console - Data Lake Browser
 
-**Truy cập**: http://localhost:9001
-- Username: `minioadmin`
-- Password: `minioadmin`
+**Truy cập**: http://localhost:9001 (minioadmin/minioadmin)
 
 **Cấu trúc bucket**:
 ```
@@ -398,86 +392,98 @@ ecommerce-datalake/
 
 ---
 
+## Cấu hình runtime
+
+| Service | Variable | Default |
+|---------|----------|---------|
+| Ingest to Lake | `DATA_FILE` | `data/2019-Oct.csv` |
+| Ingest to Lake | `MINIO_ENDPOINT` | `http://minio:9000` |
+| Ingest to Lake | `MINIO_BUCKET` | `ecommerce-datalake` |
+| Stream Replay | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:29092` |
+| Stream Replay | `TOPIC_NAME` | `ecommerce-events` |
+| Stream Replay | `MINIO_ENDPOINT` | `http://minio:9000` |
+| Stream Replay | `MINIO_BUCKET` | `ecommerce-datalake` |
+| Stream Replay | `REPLAY_START_DATE` | `2019-10-25` |
+| Stream Replay | `EVENTS_PER_SEC` | `1000` |
+| Feature Engineering | `MINIO_ENDPOINT` | `http://minio:9000` |
+| Feature Engineering | `MINIO_BUCKET` | `ecommerce-datalake` |
+| Feature Engineering | `ES_NODES` | `elasticsearch` |
+| Feature Engineering | `ES_PORT` | `9200` |
+| Spark Streaming | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:29092` |
+| Spark Streaming | `TOPIC_NAME` | `ecommerce-events` |
+| Spark Streaming | `ES_NODES` | `elasticsearch` |
+| Spark Streaming | `ES_PORT` | `9200` |
+| Spark Streaming | `WINDOW_DURATION` | `5 minutes` |
+| Spark Streaming | `WATERMARK_DELAY` | `10 minutes` |
+| Spark Anomaly | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:29092` |
+| Spark Anomaly | `TOPIC_NAME` | `ecommerce-events` |
+| Spark Anomaly | `ES_NODES` | `elasticsearch` |
+| Spark Anomaly | `ES_PORT` | `9200` |
+| Spark Batch | `MINIO_ENDPOINT` | `http://minio:9000` |
+| Spark Batch | `MINIO_BUCKET` | `ecommerce-datalake` |
+| Spark Batch | `ES_NODES` | `elasticsearch` |
+| Spark Batch | `ES_PORT` | `9200` |
+| Customer Segmentation | `MINIO_ENDPOINT` | `http://minio:9000` |
+| Customer Segmentation | `MINIO_BUCKET` | `ecommerce-datalake` |
+| Customer Segmentation | `ES_NODES` | `elasticsearch` |
+| Customer Segmentation | `ES_PORT` | `9200` |
+| Customer Segmentation | `NUM_CLUSTERS` | `4` |
+
+---
+
 ## Troubleshooting
 
-### Elasticsearch index_not_found_exception
+### Elasticsearch `index_not_found_exception`
 
-**Nguyên nhân**: Streaming services chưa chạy hoặc chưa có data.
-
-**Giải pháp**:
+Streaming services chưa chạy hoặc chưa có data.
 ```bash
-# Start streaming services (chỉ MỘT Spark streaming container tại một thời điểm)
 docker compose up -d spark-streaming
 docker compose up stream-replay
-
-# Chờ 2-3 phút cho data flow
+# Chờ 2-3 phút
 curl.exe "http://localhost:9200/_cat/indices?v"
 ```
 
 ### Không có data trong Kibana Discover
 
-1. **Kiểm tra data có trong ES chưa**:
-   ```bash
-   curl.exe "http://localhost:9200/batch-revenue-category/_count"
-   ```
-
-2. **Mở rộng time range**: Chọn "Last 30 days" hoặc "All time"
-
-3. **Refresh Data View fields**:
-   - Vào Stack Management → Data Views
-   - Chọn Data View → Click refresh icon
-
-4. **Đảm bảo batch job đã chạy**:
-   ```bash
-   docker compose up spark-batch
-   ```
+1. Kiểm tra data có trong ES chưa: `curl.exe "http://localhost:9200/batch-revenue-category/_count"`
+2. Mở rộng time range: chọn "Last 30 days" hoặc "All time"
+3. Refresh Data View fields: Stack Management → Data Views → refresh icon
+4. Đảm bảo batch job đã chạy: `docker compose up spark-batch`
 
 ### Kibana không load được
 
 ```bash
-# Kiểm tra Elasticsearch health
 curl.exe "http://localhost:9200/_cluster/health?pretty"
-
-# Restart Elasticsearch
 docker compose restart elasticsearch
-
-# Chờ 60 giây cho ES ready
+# Chờ 60 giây
 ```
 
-### Spark job failed với OutOfMemoryError
+### Spark OOM (exit code 137)
 
-**Tăng memory trong docker-compose.yml**:
+Không chạy 2 Spark streaming container cùng lúc. Stop `spark-streaming` trước khi start `spark-anomaly` và ngược lại.
+
+Nếu vẫn OOM, tăng memory trong `docker-compose.yml`:
 ```yaml
-environment:
-  HOME: /tmp
-  SPARK_DRIVER_MEMORY: 4g
-  SPARK_EXECUTOR_MEMORY: 4g
 command:
   - --conf
   - spark.driver.memory=4g
-  - --conf
-  - spark.executor.memory=4g
 ```
 
-### Kafka connection refused
+### Maven JAR download failed
 
-**Kiểm tra listeners config**:
-```bash
-docker compose logs kafka | grep -i listener
-```
+Lỗi mạng tạm thời. Retry — JARs được cache trong `.ivy-cache/` nên lần sau nhanh hơn.
 
-Đảm bảo `KAFKA_ADVERTISED_LISTENERS` có cả `EXTERNAL://localhost:9092`
+### `DateTimeParseException: unparsed text found at index 19`
 
-### curl là PowerShell alias
+Source data có suffix "UTC" trong `event_time`. Code dùng `regexp_replace(col("event_time"), r"\s+UTC$", "")` để xử lý.
 
-**Trên Windows PowerShell**, dùng `curl.exe` thay vì `curl`:
-```powershell
-# Sai (curl là alias của Invoke-WebRequest)
-curl "http://localhost:9200/_cat/indices?v"
+### `countDistinct not supported on streaming DataFrames`
 
-# Đúng
-curl.exe "http://localhost:9200/_cat/indices?v"
-```
+Dùng `approx_count_distinct()` thay thế trong streaming queries.
+
+### PowerShell `curl` alias
+
+Dùng `curl.exe` thay vì `curl` (PowerShell alias `curl` → `Invoke-WebRequest`).
 
 ---
 
@@ -497,17 +503,14 @@ curl.exe "http://localhost:9200/_cat/indices?v"
 spark-batch:
   environment:
     SPARK_DRIVER_MEMORY: 4g
-    SPARK_EXECUTOR_MEMORY: 4g
   command:
     - --conf
     - spark.driver.memory=4g
-    - --conf
-    - spark.executor.memory=4g
 
 # Elasticsearch - tăng heap
 elasticsearch:
   environment:
-    - ES_JAVA_OPTS=-Xms2g -Xmx2g  # Từ 512MB → 2GB
+    - ES_JAVA_OPTS=-Xms2g -Xmx2g
   deploy:
     resources:
       limits:
@@ -532,9 +535,9 @@ spark-streaming:
 
 | Scale | RAM | Thời gian batch | ES indices | Khả thi |
 |-------|-----|-----------------|------------|---------|
-| 15 GB | 8 GB | 5-10 phút | ~2 GB | ✅ |
-| 100 GB | 16-24 GB | 30-60 phút | ~10 GB | ✅ (với tuning) |
-| 1 TB+ | Cluster | Giờ | 100+ GB | ⚠️ Cần multi-node |
+| 15 GB | 8 GB | 5-10 phút | ~2 GB | OK |
+| 100 GB | 16-24 GB | 30-60 phút | ~10 GB | OK (với tuning) |
+| 1 TB+ | Cluster | Giờ | 100+ GB | Cần multi-node |
 
 ---
 
@@ -553,10 +556,30 @@ curl.exe -X DELETE "http://localhost:9200/*"
 
 ---
 
+## Elasticsearch Indices Tổng hợp
+
+| Index | Source | Nội dung |
+|-------|--------|----------|
+| `ecommerce-events` | Streaming | Raw events từ Kafka |
+| `streaming-windowed-revenue` | Streaming | Windowed aggregations (5-min) |
+| `streaming-anomalies` | Anomaly | Price/volume/session anomalies |
+| `batch-revenue-category` | Batch | Doanh thu theo category |
+| `batch-revenue-brand` | Batch | Doanh thu theo brand |
+| `batch-daily-revenue` | Batch | Xu hướng doanh thu theo ngày |
+| `batch-conversion-funnel` | Batch | View/cart/purchase counts |
+| `batch-top-products` | Batch | Top 20 sản phẩm theo revenue |
+| `batch-hourly-activity` | Batch | Hoạt động theo giờ |
+| `ml-customer-segments` | ML | Per-user segment assignment |
+| `ml-segment-summary` | ML | Segment aggregate stats |
+| `data-quality-report` | Feature Eng | Data quality stats + validation |
+
+---
+
 ## Tài liệu tham khảo
 
-- [CLAUDE.md](CLAUDE.md) - Chi tiết kiến trúc và cấu hình
+- [CLAUDE.md](CLAUDE.md) - Chi tiết kiến trúc và cấu hình cho Claude Code
 - [Kafka docs](https://kafka.apache.org/documentation/)
 - [Spark Streaming](https://spark.apache.org/docs/latest/streaming-programming-guide.html)
 - [Elasticsearch Guide](https://www.elastic.co/guide/en/elasticsearch/reference/current/index.html)
 - [Kibana User Guide](https://www.elastic.co/guide/en/kibana/current/index.html)
+- [MinIO Python SDK](https://min.io/docs/minio/linux/developers/python/minio-py.html)
