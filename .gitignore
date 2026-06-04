@@ -1,7 +1,17 @@
+# Data
 *.csv
- 
 data/
 
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# IDE
 .idea/
+
+# Spark cache
 .ivy-cache/
-*/__pycache__/
+
+# Misc
+.jbeval/
