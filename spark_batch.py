@@ -4,8 +4,8 @@ import logging
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, sum, count, avg, desc, to_timestamp, to_date,
-    hour, when, lit, round as spark_round, countDistinct,
-    regexp_replace, date_trunc
+    hour, when, lit, round as spark_round, countDistinct, date_trunc,
+    stddev, coalesce
 )
 
 logging.basicConfig(
@@ -91,6 +91,20 @@ def revenue_by_brand(purchases):
     )
 
 
+def hourly_activity(df):
+    return (
+        df
+        .withColumn(
+            "event_hour",
+            hour(col("event_time"))
+        )
+        .filter(col("event_hour").isNotNull())
+        .groupBy("event_hour", "event_type")
+        .agg(count("*").alias("event_count"))
+        .orderBy("event_hour", "event_type")
+    )
+
+
 def daily_revenue(purchases):
 
     daily = (
@@ -125,15 +139,39 @@ def weekly_revenue(purchases):
     )
     return weekly
 
-def conversion_funnel(df):
-    counts = df.groupBy("event_type").count()
+def event_ratio(df):
+    counts = df.groupBy("event_type").agg(count("*").alias("count"))
     total = counts.agg(sum("count").alias("total")).collect()[0]["total"]
+
+    pivot = {
+        row["event_type"]: row["count"]
+        for row in counts.collect()
+    }
+
+    views     = pivot.get("view", 0)
+    carts     = pivot.get("cart", 0)
+    purchases = pivot.get("purchase", 0)
+
     return (
         counts
         .withColumn("percentage", spark_round(col("count") / lit(total) * 100, 2))
+        .withColumn("view_to_cart_rate",
+            when(col("event_type") == "cart",
+                spark_round(lit(carts) / lit(views) * 100, 2) if views > 0 else lit(0.0)
+            )
+        )
+        .withColumn("cart_to_purchase_rate",
+            when(col("event_type") == "purchase",
+                spark_round(lit(purchases) / lit(carts) * 100, 2) if carts > 0 else lit(0.0)
+            )
+        )
+        .withColumn("overall_conversion_rate",
+            when(col("event_type") == "purchase",
+                spark_round(lit(purchases) / lit(views) * 100, 2) if views > 0 else lit(0.0)
+            )
+        )
         .orderBy(desc("count"))
     )
-
 
 def top_products(purchases, n=20):
     return (
@@ -147,21 +185,43 @@ def top_products(purchases, n=20):
         .limit(n)
     )
 
+# VERY sloppy version without category levels. pray to your gods no one sees this.
+def price_baseline(df):
+    # 1. Pre-calculate global store-wide defaults as a backup safety net
+    global_stats = df.filter(col("price").isNotNull()).agg(
+        spark_round(avg("price"), 2).alias("global_avg"),
+        spark_round(stddev("price"), 2).alias("global_std")
+    ).collect()[0]
 
-def hourly_activity(df):
+    global_avg = global_stats["global_avg"] or 100.00
+    global_std = global_stats["global_std"] or 50.00
+
     return (
         df
-        .withColumn(
-            "event_hour",
-            hour(col("event_time"))
+        .filter(col("category_code").isNotNull() & col("price").isNotNull())
+        .groupBy("category_code")
+        .agg(
+            spark_round(avg("price"), 2).alias("raw_avg"),
+            spark_round(stddev("price"), 2).alias("raw_std"),
+            count("*").alias("sample_size")
         )
-        .filter(col("event_hour").isNotNull())
-        .groupBy("event_hour", "event_type")
-        .agg(count("*").alias("event_count"))
-        .orderBy("event_hour", "event_type")
+        .filter(
+            (col("sample_size") >= 30) &
+            col("baseline_std").isNotNull() &
+            (col("baseline_std") > 0)
+        )
+        # 2. check if sample size is >= 30. If not, inject the global defaults.
+        .withColumn("baseline_avg", col("raw_avg"))
+        # fall back for stddev, and protect against a 0 stddev causing a division-by-zero later
+        .withColumn("baseline_std", col("raw_std"))
+        .select(
+            col("category_code"),
+            col("baseline_avg"),
+            col("baseline_std"),
+            col("sample_size")
+        )
     )
-
-
+# this is a huge monolith, very avoidable by separating the calculations into small files. but alas.
 def main():
     logger.info("Starting batch analytics...")
     spark = create_spark_session()
@@ -192,8 +252,10 @@ def main():
     write_to_es(weekly_revenue(purchases), "batch-weekly-revenue")
 
     logger.info("Computing conversion funnel...")
-    write_to_es(conversion_funnel(df), "batch-conversion-funnel")
+    write_to_es(event_ratio(df), "batch-conversion-funnel")
 
+    logger.info("Calculating price baselines")
+    write_to_es(price_baseline(df), "batch-price-baseline")
     logger.info("Computing top products...")
     write_to_es(top_products(purchases), "batch-top-products")
 
