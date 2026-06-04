@@ -6,3 +6,7 @@ GUIDE.md
 .ivy-cache/
 
 slides/
+.jbeval/   
+.idea/
+.venv/
+__pycache__/
