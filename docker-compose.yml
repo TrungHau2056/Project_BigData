@@ -289,6 +289,8 @@ services:
         condition: service_completed_successfully
       elasticsearch:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     working_dir: /app
     environment:
       PYTHONPATH: /app
@@ -297,7 +299,11 @@ services:
       TOPIC_NAME: ecommerce-events
       ES_NODES: elasticsearch
       ES_PORT: 9200
-      SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: ecommerce-datalake
+      SPARK_KAFKA_PACKAGE: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
     command:
       - /opt/spark/bin/spark-submit
       - --master
@@ -305,7 +311,7 @@ services:
       - --conf
       - spark.jars.ivy=/tmp/.ivy2
       - --packages
-      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
       - /app/streaming/streaming_anomaly.py
     volumes:
       - ./:/app

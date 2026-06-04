@@ -21,12 +21,16 @@ logger = logging.getLogger(__name__)
 CONFIG = {
     "spark_kafka_package": os.environ.get(
         "SPARK_KAFKA_PACKAGE",
-        "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3"
+        "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262"
     ),
     "kafka_bootstrap_servers": os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092"),
     "topic_name": os.environ.get("TOPIC_NAME", "ecommerce-events"),
     "es_nodes": os.environ.get("ES_NODES", "elasticsearch"),
     "es_port": os.environ.get("ES_PORT", "9200"),
+    "minio_endpoint": os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
+    "minio_access_key": os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
+    "minio_secret_key": os.environ.get("MINIO_SECRET_KEY", "minioadmin"),
+    "minio_bucket": os.environ.get("MINIO_BUCKET", "ecommerce-datalake"),
     "checkpoint_location": os.environ.get("CHECKPOINT_LOCATION", "/tmp/spark-checkpoints/anomaly"),
 }
 
@@ -42,6 +46,12 @@ def create_spark_session() -> SparkSession:
         .config("spark.jars.packages", CONFIG["spark_kafka_package"])
         .config("spark.driver.host", "127.0.0.1")
         .config("spark.driver.bindAddress", "127.0.0.1")
+        .config("spark.hadoop.fs.s3a.endpoint", CONFIG["minio_endpoint"])
+        .config("spark.hadoop.fs.s3a.access.key", CONFIG["minio_access_key"])
+        .config("spark.hadoop.fs.s3a.secret.key", CONFIG["minio_secret_key"])
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config("spark.driver.memory", "2g")
         .getOrCreate()
     )
 
@@ -177,6 +187,17 @@ def detect_anomalies(batch_df, batch_id):
         from functools import reduce
         all_anomalies = reduce(lambda a, b: a.unionByName(b, allowMissingColumns=True), anomalies)
         write_anomalies_to_es(all_anomalies, batch_id)
+
+        # Write anomalies to MinIO (Parquet)
+        (
+            all_anomalies
+            .withColumn("event_date", date_format(col("processing_time"), "yyyy-MM-dd"))
+            .write
+            .partitionBy("event_date")
+            .mode("append")
+            .parquet(f"s3a://{CONFIG['minio_bucket']}/anomalies/")
+        )
+        logger.info(f"Anomaly batch {batch_id}: wrote to MinIO s3a://{CONFIG['minio_bucket']}/anomalies/")
 
 def main():
     logger.info("Starting Streaming Anomaly Detection...")

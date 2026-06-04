@@ -207,8 +207,8 @@ def price_baseline(df):
         )
         .filter(
             (col("sample_size") >= 30) &
-            col("baseline_std").isNotNull() &
-            (col("baseline_std") > 0)
+            col("raw_std").isNotNull() &
+            (col("raw_std") > 0)
         )
         # 2. check if sample size is >= 30. If not, inject the global defaults.
         .withColumn("baseline_avg", col("raw_avg"))

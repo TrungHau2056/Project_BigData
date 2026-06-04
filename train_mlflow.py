@@ -27,7 +27,7 @@ def main():
         "secret": "minioadmin"
     }
 
-    session_features_path = "s3://ecommerce-datalake/gold_zone/user_features/"
+    session_features_path = "s3://ecommerce-datalake/features/session_features/"
     logger.info(f"Loading data from: {session_features_path}")
     
     df = pd.read_parquet(session_features_path, storage_options=storage_options)
