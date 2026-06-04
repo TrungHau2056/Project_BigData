@@ -48,12 +48,13 @@ with DAG(
             "/opt/spark/bin/spark-submit",
             "--master", "local[*]",
             "--conf", "spark.jars.ivy=/tmp/.ivy2",
-            "--conf", "spark.driver.memory=2g",
+            "--conf", "spark.driver.memory=4g",
             "--packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3",
             "/app/spark_batch.py",
         ],
         mounts=COMMON_MOUNTS,
         docker_url="unix://var/run/docker.sock",
+        api_version="auto",
         network_mode="project_bigdata_default",
         auto_remove=True,
     )
@@ -76,10 +77,11 @@ with DAG(
         entrypoint="/bin/bash",
         command=[
             "-c",
-            "pip install numpy && /opt/spark/bin/spark-submit --master local[*] --conf spark.jars.ivy=/tmp/.ivy2 --conf spark.driver.memory=2g --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3 /app/customer_segmentation.py",
+            "pip install numpy && /opt/spark/bin/spark-submit --master local[*] --conf spark.jars.ivy=/tmp/.ivy2 --conf spark.driver.memory=4g --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3 /app/customer_segmentation.py",
         ],
         mounts=COMMON_MOUNTS,
         docker_url="unix://var/run/docker.sock",
+        api_version="auto",
         network_mode="project_bigdata_default",
         auto_remove=True,
     )

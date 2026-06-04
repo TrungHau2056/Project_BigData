@@ -163,7 +163,7 @@ services:
       - --conf
       - spark.jars.ivy=/tmp/.ivy2
       - --conf
-      - spark.driver.memory=2g
+      - spark.driver.memory=4g
       - --packages
       - org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.elasticsearch:elasticsearch-spark-30_2.12:8.4.3
       - /app/feature_engineering.py
